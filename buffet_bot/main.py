@@ -3,8 +3,8 @@ import json
 import click
 from dotenv import load_dotenv
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest
-from alpaca.trading.enums import OrderSide, TimeInForce
+from alpaca.trading.requests import MarketOrderRequest, GetOrdersRequest
+from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
 import yfinance as yf
 import pandas as pd
 import ollama
@@ -259,6 +259,46 @@ def buy(ticker, risk, primary_model):
 
     if click.confirm(f'Execute BUY {ticker}? (Paper)'):
         _place_order(ticker, result['best_buy_resp'])
+
+@cli.command()
+@click.option('--limit', default=20, show_default=True, help='Max number of orders to show.')
+@click.option('--ticker', default=None, help='Filter by ticker symbol.')
+@click.option('--status', 'order_status', default='all', type=click.Choice(['all', 'open', 'closed']), show_default=True)
+def history(limit, ticker, order_status):
+    """Show past paper trades: buffet-bot history --ticker AAPL"""
+    status_map = {
+        'all': QueryOrderStatus.ALL,
+        'open': QueryOrderStatus.OPEN,
+        'closed': QueryOrderStatus.CLOSED,
+    }
+    request = GetOrdersRequest(
+        status=status_map[order_status],
+        limit=limit,
+        symbols=[ticker.upper()] if ticker else None,
+    )
+    try:
+        orders = trading_client.get_orders(filter=request)
+    except Exception as e:
+        click.echo(f"Error fetching orders: {e}")
+        return
+
+    if not orders:
+        click.echo("No orders found.")
+        return
+
+    rows = []
+    for o in orders:
+        rows.append({
+            'Date': str(o.submitted_at)[:19] if o.submitted_at else '',
+            'Symbol': o.symbol,
+            'Side': o.side.value.upper(),
+            'Qty': o.qty,
+            'Fill Price': o.filled_avg_price or '',
+            'Status': o.status.value,
+        })
+
+    df = pd.DataFrame(rows)
+    click.echo(df.to_string(index=False))
 
 @cli.command()
 def scan():
