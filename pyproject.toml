@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "buffet-bot"
+version = "0.1.0"
+description = "Buffett AI Trading Bot - Local LLM powered CLI"
+requires-python = ">=3.10"
+dependencies = [
+    "alpaca-py==0.28.1",
+    "yfinance>=1.0.0",
+    "pandas==2.2.3",
+    "numpy==2.2.3",
+    "click==8.1.7",
+    "python-dotenv==1.0.1",
+    "ollama==0.3.3",
+    "requests==2.31.0",
+    "rich>=14.0.0",
+    "plotext>=5.3.0",
+]
+
+[project.scripts]
+buffet-bot = "buffet_bot.main:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["buffet_bot*"]
