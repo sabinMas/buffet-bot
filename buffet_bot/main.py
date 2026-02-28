@@ -1,8 +1,10 @@
 import os
 import json
+import asyncio
 import click
 import requests
 from datetime import datetime, timezone, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import sqlite3
 import math
 import itertools
@@ -20,6 +22,17 @@ import ollama
 import time
 import warnings
 warnings.filterwarnings('ignore')
+
+from buffet_bot.politicians import (
+    fetch_house_trades, fetch_fmp_trades, merge_deduplicate, display_politician_trades,
+)
+from buffet_bot.crypto import (
+    CRYPTO_SYMBOLS, is_crypto_symbol,
+    get_crypto_bars, get_crypto_quote, get_crypto_volatility,
+    init_coinbase, coinbase_market_buy, get_coinbase_balance,
+)
+from buffet_bot.volatile import scan_volatile, display_volatile_table, VOLATILE_UNIVERSE
+from buffet_bot.ibkr import get_ibkr_status, ibkr_market_order
 
 from rich.console import Console
 from rich.panel import Panel
@@ -1147,6 +1160,137 @@ def _run_backtest(ticker, period_years, initial_capital, compare_spy, buy_and_ho
         return None, [], [], None
 
 
+# ── Crypto analysis helper ────────────────────────────────────────────────────
+
+def _analyze_crypto(symbol: str, dry_run: bool, primary_model: str) -> None:
+    """Full crypto analysis flow — data fetch, LLM consensus, optional Coinbase order."""
+    console.print(Panel(
+        f"[bold]{symbol}[/bold]  |  [dim]Crypto asset[/dim]",
+        title="Analyzing Crypto", border_style="yellow"))
+
+    with console.status(f"[bold yellow]Fetching crypto data for {symbol}...[/bold yellow]"):
+        quote   = get_crypto_quote(symbol)
+        vol     = get_crypto_volatility(symbol)
+        bars    = get_crypto_bars(symbol, days=30)
+
+    # Display live quote panel
+    if quote:
+        console.print(Panel(
+            f"Bid: [dim]${quote.get('bid', 0):,.6f}[/dim]  "
+            f"Ask: [dim]${quote.get('ask', 0):,.6f}[/dim]  "
+            f"Mid: [bold]${quote.get('mid', 0):,.6f}[/bold]",
+            title=f"[bold]{symbol}[/bold] Live Quote",
+            border_style="yellow",
+        ))
+    else:
+        console.print(f"[dim]Live quote unavailable for {symbol}[/dim]")
+
+    # Display volatility metrics
+    if vol:
+        return_color = "green" if vol.get("return_30d", 0) >= 0 else "red"
+        console.print(Panel(
+            f"30-day Return:       [{return_color}]{vol.get('return_30d', 0):+.1f}%[/{return_color}]\n"
+            f"Annualised Vol:      [yellow]{vol.get('vol_30d_annualized', 0):.1f}%[/yellow]\n"
+            f"Daily Std Dev:       {vol.get('daily_std', 0):.2f}%\n"
+            f"Max Drawdown (30d):  [red]{vol.get('max_drawdown', 0):.1f}%[/red]",
+            title="Volatility Metrics",
+            border_style="dim",
+        ))
+
+    # Build price history string for LLM
+    price_context = ""
+    if not bars.empty and "close" in bars.columns:
+        last5 = bars["close"].tail(5).round(6).tolist()
+        price_context = f"Last 5 closes: {last5}"
+
+    # LLM prompt adapted for crypto
+    prompt = f"""
+Crypto Trading AI — {symbol}
+Asset Type: Cryptocurrency
+{f"Mid Price: ${quote.get('mid', 0):,.6f}" if quote else ""}
+{f"30-day Return: {vol.get('return_30d', 0):+.1f}%" if vol else ""}
+{f"Annualised Volatility: {vol.get('vol_30d_annualized', 0):.1f}%" if vol else ""}
+{f"Max Drawdown (30d): {vol.get('max_drawdown', 0):.1f}%" if vol else ""}
+{price_context}
+
+Rules:
+- Crypto is highly volatile; size positions at max 2% of portfolio per trade
+- Use momentum + volatility context to inform action
+- Stop-loss at 8-15% for crypto (wider than equities)
+
+JSON only: {{"action": "BUY|SELL|HOLD", "confidence": 0.75, "usd_amount": 200, "reason": "2 sentences", "stop_pct": 0.10}}
+"""
+
+    models_to_query = [primary_model]
+    if primary_model != MODELS[1]:
+        models_to_query.append(MODELS[1])
+
+    responses = {}
+    for model in models_to_query:
+        try:
+            resp = ollama.chat(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                options={"temperature": 0.2},
+            )
+            content = resp["message"]["content"].strip()
+            start, end = content.find("{"), content.rfind("}") + 1
+            if start >= 0 and end > start:
+                responses[model] = json.loads(content[start:end])
+            else:
+                responses[model] = {"error": "No JSON", "raw": content[:200]}
+        except json.JSONDecodeError:
+            responses[model] = {"error": "Invalid JSON"}
+        except Exception as e:
+            responses[model] = {"error": str(e)}
+
+    _print_ai_responses(responses)
+
+    actions = [r.get("action", "HOLD") for r in responses.values()
+               if isinstance(r, dict) and "action" in r]
+    consensus = max(set(actions), key=actions.count) if actions else "HOLD"
+    console.print(f"\nConsensus: {_consensus_text(consensus)}")
+
+    if not dry_run and consensus == "BUY":
+        best = max(
+            (r for r in responses.values() if isinstance(r, dict) and r.get("action") == "BUY"),
+            key=lambda x: x.get("confidence", 0),
+            default=None,
+        )
+        if best is None:
+            console.print("[yellow]No valid BUY signal.[/yellow]")
+            return
+
+        usd_amount = float(best.get("usd_amount", 100))
+
+        # Route order: Coinbase if configured, else Alpaca paper crypto
+        cb_key = os.getenv("COINBASE_API_KEY")
+        broker = "Coinbase (live)" if cb_key else "Alpaca paper"
+        if click.confirm(f"Execute BUY ${usd_amount:.2f} of {symbol} via {broker}?"):
+            if cb_key:
+                try:
+                    result = coinbase_market_buy(symbol, usd_amount)
+                    console.print(f"[bold green]Coinbase order submitted:[/bold green] {result}")
+                except Exception as e:
+                    console.print(f"[red]Coinbase order error: {e}[/red]")
+            else:
+                # Alpaca paper crypto order
+                try:
+                    from alpaca.trading.requests import MarketOrderRequest as _MOR
+                    from alpaca.trading.enums import OrderSide as _OS, TimeInForce as _TIF
+                    alpaca_sym = symbol.replace("/", "")  # "BTCUSD"
+                    order = _MOR(
+                        symbol=alpaca_sym,
+                        notional=round(usd_amount, 2),
+                        side=_OS.BUY,
+                        time_in_force=_TIF.GTC,
+                    )
+                    result = trading_client.submit_order(order)
+                    console.print(f"[bold green]Alpaca paper crypto order: {result.id}[/bold green]")
+                except Exception as e:
+                    console.print(f"[red]Alpaca order error: {e}[/red]")
+
+
 # ── Commands ──────────────────────────────────────────────────────────────────
 
 @cli.command()
@@ -1215,7 +1359,14 @@ def lookup(query):
 @click.option('--strategy', type=click.Choice(['value', 'growth', 'dividend', 'turnaround']),
               default='value', show_default=True, help='Investment strategy lens.')
 def analyze(ticker, risk, dry_run, primary_model, strategy):
-    """Analyze stock: buffet-bot analyze AAPL --risk high --strategy growth"""
+    """Analyze stock or crypto: buffet-bot analyze AAPL / buffet-bot analyze BTC/USD"""
+    ticker = ticker.upper()
+
+    # ── Crypto routing ────────────────────────────────────────────────────────
+    if is_crypto_symbol(ticker):
+        _analyze_crypto(ticker, dry_run, primary_model)
+        return
+
     console.print(Panel(
         f"[bold]{ticker}[/bold]  |  Risk: [yellow]{risk}[/yellow]  |  Strategy: [cyan]{strategy}[/cyan]",
         title="Analyzing", border_style="blue"))
@@ -1485,10 +1636,15 @@ def scan():
     """Scan top stocks for Buffett opportunities"""
     tickers = ['AAPL', 'MSFT', 'GOOGL', 'BRK-B', 'JNJ', 'V', 'JPM', 'PG']
     scores = {}
-    with console.status("[bold blue]Scanning watchlist...[/bold blue]"):
-        for t in tickers:
-            scores[t] = get_buffett_metrics(t)['score']
-            time.sleep(1)
+    with console.status("[bold blue]Scanning watchlist (concurrent)...[/bold blue]"):
+        with ThreadPoolExecutor(max_workers=len(tickers)) as pool:
+            futures = {pool.submit(get_buffett_metrics, t): t for t in tickers}
+            for fut in as_completed(futures):
+                t = futures[fut]
+                try:
+                    scores[t] = fut.result().get('score', 0)
+                except Exception:
+                    scores[t] = 0
 
     top = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:5]
 
@@ -1504,14 +1660,56 @@ def scan():
 
 @cli.command()
 def status():
-    """Check account status"""
+    """Check account status — Alpaca paper, Coinbase, and IBKR if configured."""
+    # ── Alpaca paper ─────────────────────────────────────────────────────────
     account = trading_client.get_account()
     console.print(Panel(
         f"Cash:          [bold green]${float(account.cash):,.2f}[/bold green]\n"
         f"Buying Power:  [bold cyan]${float(account.buying_power):,.2f}[/bold cyan]",
-        title="Paper Account",
+        title="[bold]Alpaca Paper Account[/bold]",
         border_style="blue",
     ))
+
+    # ── Coinbase (optional) ───────────────────────────────────────────────────
+    cb_key = os.getenv("COINBASE_API_KEY")
+    if cb_key:
+        with console.status("[dim]Fetching Coinbase balance...[/dim]"):
+            cb = get_coinbase_balance()
+        if cb:
+            rows = "\n".join(
+                f"  {r['currency']}: [bold]{r['balance']:,.6f}[/bold]"
+                for r in cb["accounts"]
+            )
+            console.print(Panel(
+                f"[bold green]USD Cash: ${cb['total_usd']:,.2f}[/bold green]\n{rows}",
+                title="[bold]Coinbase (Live)[/bold]",
+                border_style="yellow",
+            ))
+        else:
+            console.print("[dim]Coinbase: connected but could not fetch balances.[/dim]")
+    else:
+        console.print("[dim]Coinbase: not configured (set COINBASE_API_KEY to enable).[/dim]")
+
+    # ── IBKR (optional) ───────────────────────────────────────────────────────
+    ibkr_acct = os.getenv("IBKR_ACCOUNT_ID")
+    if ibkr_acct:
+        with console.status("[dim]Connecting to IBKR (TWS/IB Gateway)...[/dim]"):
+            ibkr = get_ibkr_status()
+        if ibkr:
+            console.print(Panel(
+                f"Net Liquidation: [bold green]${ibkr.get('NetLiquidation', 0):,.2f}[/bold green]\n"
+                f"Total Cash:      [bold cyan]${ibkr.get('TotalCashValue', 0):,.2f}[/bold cyan]\n"
+                f"Buying Power:    [bold cyan]${ibkr.get('BuyingPower', 0):,.2f}[/bold cyan]",
+                title=f"[bold]IBKR — {ibkr.get('account', ibkr_acct)}[/bold]",
+                border_style="magenta",
+            ))
+        else:
+            console.print(
+                "[dim]IBKR: could not connect — is TWS or IB Gateway running on "
+                f"{os.getenv('IBKR_HOST', '127.0.0.1')}:{os.getenv('IBKR_PORT', '7497')}?[/dim]"
+            )
+    else:
+        console.print("[dim]IBKR: not configured (set IBKR_ACCOUNT_ID to enable).[/dim]")
 
 @cli.command()
 @click.option('--plan', default=None, help='Load and run a saved plan by name.')
@@ -2332,6 +2530,191 @@ def dashboard(tickers):
             time.sleep(60)
     except KeyboardInterrupt:
         console.print("\n[dim]Dashboard stopped.[/dim]")
+
+
+# ── New v0.4.0 commands ───────────────────────────────────────────────────────
+
+@cli.command()
+@click.argument('ticker')
+@click.option('--days', default=90, show_default=True, type=int,
+              help='Look-back window for congressional trades (days).')
+@click.option('--model', 'primary_model', default='deepseek-r1', type=click.Choice(MODELS))
+def news(ticker, days, primary_model):
+    """News + congressional trade intelligence: buffet-bot news AAPL --days 60"""
+    ticker = ticker.upper()
+    console.print(Panel(
+        f"[bold]{ticker}[/bold]  |  Congressional trade window: [cyan]{days}d[/cyan]",
+        title="News & Politician Intelligence", border_style="blue",
+    ))
+
+    # 1) Alpaca news headlines (reuse existing helper)
+    recent_news = get_recent_news(ticker, limit=8)
+    _print_live_market(ticker, get_realtime_data(ticker), recent_news)
+
+    # 2) Short interest + beta from yfinance
+    try:
+        info       = yf.Ticker(ticker).info
+        beta       = info.get("beta")
+        short_pct  = info.get("shortPercentOfFloat")
+        short_ratio = info.get("shortRatio")
+        shares_short = info.get("sharesShort")
+
+        rows = []
+        if beta       is not None: rows.append(f"Beta:               [yellow]{beta:.2f}[/yellow]")
+        if short_pct  is not None: rows.append(f"Short % of Float:   [yellow]{short_pct*100:.1f}%[/yellow]")
+        if short_ratio is not None: rows.append(f"Short Ratio (days): [yellow]{short_ratio:.1f}[/yellow]")
+        if shares_short is not None: rows.append(f"Shares Short:       [dim]{shares_short:,}[/dim]")
+
+        if rows:
+            console.print(Panel("\n".join(rows), title="Short Interest & Beta", border_style="dim"))
+    except Exception:
+        pass
+
+    # 3) Congressional trades (House Stock Watcher + FMP merged)
+    console.print(f"\n[bold]Congressional Trades — last {days} days[/bold]")
+    with console.status("[dim]Fetching congressional data...[/dim]"):
+        house_trades = fetch_house_trades(ticker=ticker, days=days)
+        fmp_trades   = fetch_fmp_trades(ticker=ticker)
+    all_trades = merge_deduplicate(house_trades, fmp_trades)
+    display_politician_trades(all_trades, ticker, console)
+
+    if not os.getenv("FMP_API_KEY"):
+        console.print(
+            "[dim]Tip: Set FMP_API_KEY in .env for Senate trade data "
+            "(free at financialmodelingprep.com)[/dim]"
+        )
+
+    # 4) AI sentiment summary combining news + politician activity
+    if recent_news or all_trades:
+        news_text = "\n".join(
+            f"- [{n['published_at']}] {n['headline']}" for n in recent_news
+        ) if recent_news else "No recent news."
+
+        pol_buys  = sum(1 for t in all_trades if t["action"] == "Purchase")
+        pol_sells = sum(1 for t in all_trades if t["action"] == "Sale")
+        pol_text  = (
+            f"{len(all_trades)} congressional trades in the last {days} days: "
+            f"{pol_buys} purchases, {pol_sells} sales."
+            if all_trades else "No congressional trades found."
+        )
+
+        ai_prompt = (
+            f"Summarize the investment sentiment for {ticker} based on:\n\n"
+            f"NEWS:\n{news_text}\n\n"
+            f"CONGRESSIONAL ACTIVITY:\n{pol_text}\n\n"
+            "In 3-4 sentences, assess: is there bullish or bearish signal from insider/politician "
+            "activity and news? What should a retail investor watch for?"
+        )
+        with console.status("[dim]Querying AI for sentiment summary...[/dim]"):
+            try:
+                resp = ollama.chat(
+                    model=primary_model,
+                    messages=[{"role": "user", "content": ai_prompt}],
+                    options={"temperature": 0.4},
+                )
+                summary = resp["message"]["content"].strip()
+                color = MODEL_COLORS.get(primary_model, "white")
+                console.print(Panel(
+                    summary,
+                    title=f"[bold {color}]AI Sentiment Summary ({primary_model})[/bold {color}]",
+                    border_style=color,
+                ))
+            except Exception as e:
+                console.print(f"[dim]AI summary unavailable: {e}[/dim]")
+
+
+@cli.command()
+@click.argument('symbol', required=False, default=None)
+@click.option('--dry-run/--execute', default=True)
+@click.option('--model', 'primary_model', default='deepseek-r1', type=click.Choice(MODELS))
+def crypto(symbol, dry_run, primary_model):
+    """Crypto dashboard or single analysis: buffet-bot crypto / buffet-bot crypto BTC/USD"""
+    if symbol:
+        # Single crypto analysis
+        _analyze_crypto(symbol.upper(), dry_run, primary_model)
+        return
+
+    # No symbol → show dashboard of all supported crypto
+    console.print(Panel(
+        "[bold]Crypto Dashboard[/bold]  —  Alpaca paper data\n"
+        f"[dim]{', '.join(CRYPTO_SYMBOLS)}[/dim]",
+        border_style="yellow",
+    ))
+
+    tbl = Table(
+        title="Crypto Live Quotes",
+        box=box.ROUNDED,
+        header_style="bold yellow",
+    )
+    tbl.add_column("Symbol",     style="bold cyan")
+    tbl.add_column("Mid Price",  justify="right")
+    tbl.add_column("30d Return", justify="right")
+    tbl.add_column("Ann. Vol%",  justify="right")
+    tbl.add_column("Max DD%",    justify="right")
+
+    with console.status("[dim]Fetching crypto data...[/dim]"):
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            quote_futures = {pool.submit(get_crypto_quote, s): s for s in CRYPTO_SYMBOLS}
+            vol_futures   = {pool.submit(get_crypto_volatility, s): s for s in CRYPTO_SYMBOLS}
+
+            quotes = {}
+            for fut in as_completed(quote_futures):
+                s = quote_futures[fut]
+                try:
+                    quotes[s] = fut.result()
+                except Exception:
+                    quotes[s] = {}
+
+            vols = {}
+            for fut in as_completed(vol_futures):
+                s = vol_futures[fut]
+                try:
+                    vols[s] = fut.result()
+                except Exception:
+                    vols[s] = {}
+
+    for sym in CRYPTO_SYMBOLS:
+        q = quotes.get(sym, {})
+        v = vols.get(sym, {})
+        mid = q.get("mid")
+        ret = v.get("return_30d")
+        avol = v.get("vol_30d_annualized")
+        dd   = v.get("max_drawdown")
+
+        ret_color = "green" if (ret or 0) >= 0 else "red"
+        tbl.add_row(
+            sym,
+            f"${mid:,.4f}"                              if mid  is not None else "—",
+            f"[{ret_color}]{ret:+.1f}%[/{ret_color}]"  if ret  is not None else "—",
+            f"{avol:.0f}%"                              if avol is not None else "—",
+            f"[red]{dd:.1f}%[/red]"                    if dd   is not None else "—",
+        )
+
+    console.print(tbl)
+    console.print("[dim]Run 'buffet-bot crypto BTC/USD' for a full analysis.[/dim]")
+
+
+@cli.command()
+@click.option('--n', default=10, show_default=True, type=int,
+              help='Number of top volatile tickers to show.')
+@click.option('--universe', multiple=True, metavar='TICKER',
+              help='Custom tickers to screen (repeatable). Uses built-in universe if omitted.')
+def volatile(n, universe):
+    """High-beta small-cap volatility scanner: buffet-bot volatile --n 15"""
+    custom = list(t.upper() for t in universe) if universe else None
+    label  = f"custom ({len(custom)} tickers)" if custom else f"built-in ({len(VOLATILE_UNIVERSE)} tickers)"
+    console.print(Panel(
+        f"Scanning [bold]{label}[/bold], showing top [bold]{n}[/bold] by volatility score",
+        title="Volatile Scanner", border_style="magenta",
+    ))
+
+    with console.status("[bold magenta]Scoring tickers concurrently...[/bold magenta]"):
+        results = scan_volatile(universe=custom, n=n)
+
+    display_volatile_table(results, console)
+    console.print(
+        "[dim]Score weights: Beta 30 | Mkt Cap <$2B 25 | Short% 25 | 30d Vol 20[/dim]"
+    )
 
 
 def main():
