@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip install:*)",
+      "Bash(python:*)",
+      "Bash(/c/Users/mason/AppData/Roaming/Python/Python313/Scripts/buffet-bot.exe status:*)",
+      "Bash(powershell.exe:*)",
+      "Bash(git:*)",
+      "Bash(pip show:*)",
+      "Bash(buffet-bot:*)",
+      "Bash(PATH=\"/c/Users/mason/AppData/Roaming/Python/Python313/Scripts:$PATH\" buffet-bot:*)",
+      "Bash(PATH=\"/c/Users/mason/AppData/Roaming/Python/Python313/Scripts:$PATH\" buffet-bot status:*)",
+      "Bash(PATH=\"/c/Users/mason/AppData/Roaming/Python/Python313/Scripts:$PATH\" buffet-bot lookup:*)",
+      "Bash(PATH=\"/c/Users/mason/AppData/Roaming/Python/Python313/Scripts:$PATH\" buffet-bot history:*)",
+      "Bash(curl:*)",
+      "Bash(tasklist:*)",
+      "Bash(where ollama:*)",
+      "Bash(\"$OLLAMA\" list:*)",
+      "Bash(\"$OLLAMA\" pull:*)",
+      "Bash(echo:*)",
+      "Bash(~/.bashrc:*)"
+    ]
+  }
+}

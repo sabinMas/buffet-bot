@@ -1,0 +1,2 @@
+[console_scripts]
+buffet-bot = buffet_bot.main:main
