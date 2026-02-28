@@ -1,8 +1,0 @@
-alpaca-py==0.28.1
-yfinance>=1.0.0
-pandas==2.2.3
-numpy==2.2.3
-click==8.1.7
-python-dotenv==1.0.1
-ollama==0.3.3
-requests==2.31.0

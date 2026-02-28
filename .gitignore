@@ -6,3 +6,5 @@ buffet_bot/  # Or whatever your venv folder is named
 *.log
 .DS_Store
 .pytest_cache/
+.claude/
+buffet_bot.egg-info/
