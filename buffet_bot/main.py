@@ -7,6 +7,8 @@ from dotenv import load_dotenv
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest, GetOrdersRequest
 from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
+from alpaca.data import StockHistoricalDataClient
+from alpaca.data.requests import StockLatestQuoteRequest, StockLatestBarRequest
 import yfinance as yf
 import pandas as pd
 import ollama
@@ -30,6 +32,7 @@ if not API_KEY or not SECRET_KEY:
     raise ValueError("Add ALPACA_API_KEY and ALPACA_SECRET_KEY to .env")
 
 trading_client = TradingClient(API_KEY, SECRET_KEY, paper=True)
+data_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
 console = Console()
 
 MODELS = ['deepseek-r1', 'qwen2.5:7b']
@@ -87,6 +90,68 @@ def get_tech_indicators(ticker):
     macd = ema12 - ema26
     return {'rsi': round(rsi, 1), 'macd': round(macd.iloc[-1], 4)}
 
+def get_realtime_data(ticker):
+    """Fetch current price and today's OHLCV bar from Alpaca Data API."""
+    try:
+        quote_req = StockLatestQuoteRequest(symbol_or_symbols=ticker)
+        bar_req = StockLatestBarRequest(symbol_or_symbols=ticker)
+        quote = data_client.get_stock_latest_quote(quote_req)[ticker]
+        bar = data_client.get_stock_latest_bar(bar_req)[ticker]
+        mid = round((float(quote.ask_price) + float(quote.bid_price)) / 2, 2)
+        open_price = float(bar.open)
+        change_pct = round((mid - open_price) / open_price * 100, 2) if open_price else 0
+        return {
+            'price': mid,
+            'open': open_price,
+            'high': float(bar.high),
+            'low': float(bar.low),
+            'volume': int(bar.volume),
+            'change_pct': change_pct,
+            'source': 'alpaca',
+        }
+    except Exception:
+        pass
+    # Fallback to yfinance
+    try:
+        fi = yf.Ticker(ticker).fast_info
+        price = float(fi.last_price)
+        open_price = float(fi.open) if fi.open else price
+        change_pct = round((price - open_price) / open_price * 100, 2) if open_price else 0
+        return {
+            'price': price,
+            'open': open_price,
+            'high': float(fi.day_high) if fi.day_high else price,
+            'low': float(fi.day_low) if fi.day_low else price,
+            'volume': int(fi.three_month_average_volume) if fi.three_month_average_volume else 0,
+            'change_pct': change_pct,
+            'source': 'yfinance',
+        }
+    except Exception as e:
+        console.print(f"[dim red]Live quote unavailable for {ticker}: {e}[/dim red]")
+        return {}
+
+def get_recent_news(ticker, limit=5):
+    """Fetch recent news headlines from Alpaca News API."""
+    try:
+        url = "https://data.alpaca.markets/v1beta1/news"
+        headers = {
+            'APCA-API-KEY-ID': API_KEY,
+            'APCA-API-SECRET-KEY': SECRET_KEY,
+        }
+        params = {'symbols': ticker, 'limit': limit, 'sort': 'desc'}
+        resp = requests.get(url, headers=headers, params=params, timeout=5)
+        resp.raise_for_status()
+        return [
+            {
+                'headline': item.get('headline', ''),
+                'summary': item.get('summary', ''),
+                'published_at': item.get('updated_at', '')[:10],
+            }
+            for item in resp.json().get('news', [])
+        ]
+    except Exception:
+        return []
+
 # ── LLM helpers ──────────────────────────────────────────────────────────────
 
 def _query_llms_freeform(prompt_text, primary_model):
@@ -113,10 +178,36 @@ def _run_analysis(ticker, risk, primary_model):
     hist = yf.download(ticker, period='6mo', progress=False)['Close'].tail(30)
     buffett = get_buffett_metrics(ticker)
     tech = get_tech_indicators(ticker) if risk == 'high' else {}
+    realtime = get_realtime_data(ticker)
+    news = get_recent_news(ticker)
+
+    # Build live market section for the prompt
+    if realtime:
+        sign = '+' if realtime['change_pct'] >= 0 else ''
+        live_block = (
+            f"LIVE Market Data (as of now):\n"
+            f"  Price: ${realtime['price']:.2f}  |  "
+            f"Today: {sign}{realtime['change_pct']}%  |  "
+            f"Open: ${realtime['open']:.2f}  |  "
+            f"High: ${realtime['high']:.2f}  |  "
+            f"Low: ${realtime['low']:.2f}  |  "
+            f"Volume: {realtime['volume']:,}"
+        )
+    else:
+        live_block = "LIVE Market Data: unavailable"
+
+    news_block = ""
+    if news:
+        news_lines = "\n".join(
+            f"  {i+1}. [{item['published_at']}] {item['headline']}"
+            for i, item in enumerate(news)
+        )
+        news_block = f"\nRecent News (use for sentiment context):\n{news_lines}"
 
     prompt = f"""
     Buffett Trading AI for {ticker} | Risk: {risk}
     Buffett Score: {buffett['score']}/100 ({buffett})
+    {live_block}{news_block}
     Recent Prices (30d): {hist.to_dict()}
     Tech {'(RSI: ' + str(tech.get('rsi', 'N/A')) + ', MACD: ' + str(tech.get('macd', 'N/A')) + ')' if tech else ''}
 
@@ -124,6 +215,7 @@ def _run_analysis(ticker, risk, primary_model):
     - Warren Buffett: Value (high ROE/moat), consistent earnings
     - Math predictions: Regression, momentum
     - Risk mgmt: Position <2% portfolio, stop-loss 3-7%
+    - Factor in the LIVE price and recent news headlines above
 
     JSON only: {{"action": "BUY|SELL|HOLD", "confidence": 0.85, "qty": 10, "reason": "2 sentences", "stop_pct": 0.05}}
     """
@@ -159,6 +251,8 @@ def _run_analysis(ticker, risk, primary_model):
     return {
         'buffett': buffett,
         'tech': tech,
+        'realtime': realtime,
+        'news': news,
         'responses': responses,
         'consensus': consensus,
         'best_buy_resp': best_buy_resp,
@@ -189,6 +283,32 @@ def _print_ai_responses(responses):
 def _consensus_text(consensus):
     color = {'BUY': 'green', 'SELL': 'red', 'HOLD': 'yellow'}.get(consensus, 'white')
     return f"[bold {color}]{consensus}[/bold {color}]"
+
+def _print_live_market(ticker, realtime, news):
+    """Print a live market data panel and recent news table."""
+    if realtime:
+        sign = '+' if realtime['change_pct'] >= 0 else ''
+        pct_color = 'green' if realtime['change_pct'] >= 0 else 'red'
+        src = f"[dim] (via {realtime['source']})[/dim]"
+        content = (
+            f"Price:  [bold]${realtime['price']:.2f}[/bold]  "
+            f"[{pct_color}]{sign}{realtime['change_pct']}% today[/{pct_color}]{src}\n"
+            f"Open: ${realtime['open']:.2f}  "
+            f"High: ${realtime['high']:.2f}  "
+            f"Low: ${realtime['low']:.2f}  "
+            f"Vol: {realtime['volume']:,}"
+        )
+        console.print(Panel(content, title=f"[bold]{ticker}[/bold] Live Market", border_style="green"))
+    else:
+        console.print(f"[dim]Live market data unavailable for {ticker}.[/dim]")
+
+    if news:
+        table = Table(title="Recent News", box=box.SIMPLE, header_style="bold dim")
+        table.add_column("Date", style="dim", no_wrap=True)
+        table.add_column("Headline")
+        for item in news:
+            table.add_row(item['published_at'], item['headline'])
+        console.print(table)
 
 # ── Commands ──────────────────────────────────────────────────────────────────
 
@@ -261,6 +381,7 @@ def analyze(ticker, risk, dry_run, primary_model):
                         title="Analyzing", border_style="blue"))
 
     result = _run_analysis(ticker, risk, primary_model)
+    _print_live_market(ticker, result['realtime'], result['news'])
     _print_ai_responses(result['responses'])
     console.print(f"\nConsensus: {_consensus_text(result['consensus'])}")
 
@@ -281,6 +402,7 @@ def buy(ticker, risk, primary_model):
                         title="Analyzing", border_style="blue"))
 
     result = _run_analysis(ticker, risk, primary_model)
+    _print_live_market(ticker, result['realtime'], result['news'])
     _print_ai_responses(result['responses'])
     console.print(f"\nConsensus: {_consensus_text(result['consensus'])}")
 
