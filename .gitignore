@@ -1,0 +1,8 @@
+.env
+__pycache__/
+*.pyc
+venv/
+buffet_bot/  # Or whatever your venv folder is named
+*.log
+.DS_Store
+.pytest_cache/
