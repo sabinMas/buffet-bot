@@ -156,7 +156,7 @@ init_db()
 @click.group()
 @click.version_option()
 def cli():
-    """Buffett AI Trading Bot CLI - Local LLM powered"""
+    """Buffet-Bot the AI Trading Bot CLI - Local LLM Powered"""
     pass
 
 # ── Data helpers ─────────────────────────────────────────────────────────────
