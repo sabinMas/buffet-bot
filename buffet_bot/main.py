@@ -5,6 +5,9 @@ import requests
 from datetime import datetime, timezone, timedelta
 import sqlite3
 import math
+import itertools
+import numpy as np
+from collections import Counter, deque
 from dotenv import load_dotenv
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest, GetOrdersRequest
@@ -841,7 +844,6 @@ def _get_portfolio_expected_return(positions, primary_model):
 
 def _run_monte_carlo(base_return, volatility, balance, monthly, years, n=1000):
     """Simulate n portfolio paths. Returns percentile dict (all dollar values)."""
-    import numpy as np
     months = years * 12
     monthly_ret = base_return / 12
     monthly_vol = volatility / (12 ** 0.5)
@@ -897,6 +899,253 @@ def _years_to_reach(target, balance, monthly, annual_return, max_years=100):
         else:
             hi = mid
     return hi
+
+# ── Risk Management ───────────────────────────────────────────────────────────
+
+def _get_atr(ticker, period=14):
+    """Average True Range in dollars over the last 30 days."""
+    try:
+        data = yf.download(ticker, period='30d', auto_adjust=True, progress=False)
+        if isinstance(data.columns, pd.MultiIndex):
+            data.columns = data.columns.droplevel(1)
+        if data.empty or len(data) < period + 1:
+            return None
+        high       = data['High'].squeeze().astype(float)
+        low        = data['Low'].squeeze().astype(float)
+        close      = data['Close'].squeeze().astype(float)
+        prev_close = close.shift(1)
+        tr = pd.concat([
+            high - low,
+            (high - prev_close).abs(),
+            (low  - prev_close).abs(),
+        ], axis=1).max(axis=1)
+        return float(tr.rolling(period).mean().iloc[-1])
+    except Exception:
+        return None
+
+
+def _calculate_position_size(ticker, confidence, cash, risk_pct=0.02):
+    """ATR-based dynamic position sizing."""
+    try:
+        live  = get_realtime_data(ticker)
+        price = live.get('price', 0)
+        if not price:
+            return None
+        atr = _get_atr(ticker)
+        if not atr:
+            atr = price * 0.02
+        atr_pct     = atr / price
+        dollar_size = cash * (confidence * risk_pct) / atr_pct
+        qty         = max(1, math.floor(dollar_size / price))
+        return {
+            'qty':         qty,
+            'dollar_size': round(dollar_size, 2),
+            'atr_pct':     round(atr_pct * 100, 2),
+            'atr':         round(atr, 4),
+            'price':       price,
+        }
+    except Exception:
+        return None
+
+
+def _check_sell_signals(pos_list):
+    """Check each position for sell signals.
+    Returns list of (pos, signals_list, b_score, rsi_val) 4-tuples.
+    """
+    n = len(pos_list)
+    pnl_pcts = []
+    for pos in pos_list:
+        try:
+            entry   = float(pos.avg_entry_price)
+            current = float(pos.current_price)
+            pnl_pcts.append((current - entry) / entry * 100 if entry else 0.0)
+        except Exception:
+            pnl_pcts.append(0.0)
+
+    pnl_threshold = sorted(pnl_pcts)[int(len(pnl_pcts) * 0.20)] if n >= 3 else None
+
+    results = []
+    for i, pos in enumerate(pos_list):
+        signals = []
+        try:
+            entry   = float(pos.avg_entry_price)
+            current = float(pos.current_price)
+        except Exception:
+            entry = current = 0.0
+
+        if entry and current < entry * 0.93:
+            signals.append('STOP')
+
+        b_score = get_buffett_metrics(pos.symbol).get('score', 0)
+        if b_score < 40:
+            signals.append('THESIS_BROKEN')
+
+        if pnl_threshold is not None and pnl_pcts[i] <= pnl_threshold:
+            signals.append('UNDERPERFORM')
+
+        rsi_val = None
+        try:
+            tech    = get_tech_indicators(pos.symbol)
+            rsi_val = tech.get('rsi')
+            if rsi_val and rsi_val > 72:
+                signals.append('OVERBOUGHT')
+        except Exception:
+            pass
+
+        results.append((pos, signals, b_score, rsi_val))
+    return results
+
+
+def _show_sector_table(tickers):
+    """Fetch sector for each ticker and display a sector diversity breakdown."""
+    sector_counts: Counter = Counter()
+    for t in tickers:
+        try:
+            sector = yf.Ticker(t).info.get('sector', 'Unknown')
+        except Exception:
+            sector = 'Unknown'
+        sector_counts[sector] += 1
+    total = sum(sector_counts.values()) or 1
+    tbl = Table(title="Sector Breakdown", box=box.SIMPLE, header_style="bold dim")
+    tbl.add_column("Sector", style="bold")
+    tbl.add_column("Count", justify="right")
+    tbl.add_column("Weight", justify="right")
+    for sector, count in sector_counts.most_common():
+        pct   = count / total
+        color = "green" if pct < 0.30 else "yellow" if pct < 0.50 else "red"
+        tbl.add_row(sector, str(count), f"[{color}]{pct:.0%}[/{color}]")
+    console.print(tbl)
+
+
+# ── Backtesting ────────────────────────────────────────────────────────────────
+
+def _compute_rsi(series, period=14):
+    """Compute RSI as a full pandas Series."""
+    delta = series.diff()
+    gain  = delta.where(delta > 0, 0.0).rolling(period).mean()
+    loss  = (-delta.where(delta < 0, 0.0)).rolling(period).mean()
+    rs    = gain / loss
+    return 100 - (100 / (1 + rs))
+
+
+def _calculate_sharpe(daily_returns, risk_free_annual=0.05):
+    """Annualised Sharpe ratio."""
+    excess = daily_returns - risk_free_annual / 252
+    std    = excess.std()
+    if std == 0:
+        return 0.0
+    return float(excess.mean() / std * (252 ** 0.5))
+
+
+def _calculate_max_drawdown(equity_curve):
+    """Maximum peak-to-trough drawdown as a positive fraction."""
+    eq     = np.array(equity_curve, dtype=float)
+    peaks  = np.maximum.accumulate(eq)
+    denom  = np.where(peaks == 0, 1.0, peaks)
+    return float(((peaks - eq) / denom).max())
+
+
+def _run_backtest(ticker, period_years, initial_capital, compare_spy, buy_and_hold=False):
+    """RSI-based backtest. Returns (metrics, equity_curve, dates, spy_metrics_or_None).
+
+    Signal: BUY when rsi<35 and close>sma50; SELL when rsi>70 or close<entry*0.93.
+    buy_and_hold=True: buy all shares day-0 and hold (used for SPY benchmark).
+    """
+    try:
+        period_str = f"{int(period_years * 365)}d"
+        data = yf.download(ticker, period=period_str, auto_adjust=True, progress=False)
+        if isinstance(data.columns, pd.MultiIndex):
+            data.columns = data.columns.droplevel(1)
+        if len(data) < 60:
+            return None, [], [], None
+
+        close = data['Close'].squeeze().astype(float)
+        sma50 = close.rolling(50).mean()
+        rsi   = _compute_rsi(close)
+
+        cash    = float(initial_capital)
+        shares  = 0.0
+        entry_price = 0.0
+        equity_curve = []
+        dates        = []
+        trades       = []
+
+        if buy_and_hold:
+            buy_price = float(close.iloc[0])
+            shares    = cash / buy_price
+            cash      = 0.0
+            for i in range(len(close)):
+                equity_curve.append(cash + shares * float(close.iloc[i]))
+                dates.append(str(data.index[i])[:10])
+            total_return = (equity_curve[-1] - initial_capital) / initial_capital
+            cagr = (equity_curve[-1] / initial_capital) ** (1 / max(period_years, 0.01)) - 1
+            eq   = np.array(equity_curve, dtype=float)
+            dr   = pd.Series(np.diff(eq) / np.where(eq[:-1] == 0, 1.0, eq[:-1]))
+            return {
+                'ticker': ticker, 'total_return': total_return, 'cagr': cagr,
+                'sharpe': _calculate_sharpe(dr),
+                'max_drawdown': _calculate_max_drawdown(equity_curve),
+                'win_rate': None, 'avg_win': None, 'avg_loss': None,
+                'profit_factor': None, 'n_trades': None, 'buy_and_hold': True,
+            }, equity_curve, dates, None
+
+        for i in range(len(close)):
+            price = float(close.iloc[i])
+            r     = float(rsi.iloc[i])   if not pd.isna(rsi.iloc[i])   else 50.0
+            sma   = float(sma50.iloc[i]) if not pd.isna(sma50.iloc[i]) else price
+
+            if shares == 0:
+                if r < 35 and price > sma:
+                    shares      = cash / price
+                    cash        = 0.0
+                    entry_price = price
+            else:
+                if r > 70 or price < entry_price * 0.93:
+                    trades.append((entry_price, price))
+                    cash        = shares * price
+                    shares      = 0.0
+                    entry_price = 0.0
+
+            equity_curve.append(cash + shares * price)
+            dates.append(str(data.index[i])[:10])
+
+        if shares > 0:
+            last_price = float(close.iloc[-1])
+            trades.append((entry_price, last_price))
+            cash           = shares * last_price
+            equity_curve[-1] = cash
+
+        total_return = (equity_curve[-1] - initial_capital) / initial_capital
+        cagr         = (equity_curve[-1] / initial_capital) ** (1 / max(period_years, 0.01)) - 1
+        eq           = np.array(equity_curve, dtype=float)
+        dr           = pd.Series(np.diff(eq) / np.where(eq[:-1] == 0, 1.0, eq[:-1]))
+
+        wins   = [t[1] - t[0] for t in trades if t[1] >= t[0]]
+        losses = [t[0] - t[1] for t in trades if t[1] <  t[0]]
+        win_rate      = len(wins) / len(trades) if trades else 0.0
+        avg_win       = float(np.mean(wins))   if wins   else 0.0
+        avg_loss      = float(np.mean(losses)) if losses else 0.0
+        profit_factor = sum(wins) / sum(losses) if sum(losses) > 0 else float('inf')
+
+        metrics = {
+            'ticker': ticker, 'total_return': total_return, 'cagr': cagr,
+            'sharpe': _calculate_sharpe(dr),
+            'max_drawdown': _calculate_max_drawdown(equity_curve),
+            'win_rate': win_rate, 'avg_win': avg_win, 'avg_loss': avg_loss,
+            'profit_factor': profit_factor, 'n_trades': len(trades), 'buy_and_hold': False,
+        }
+
+        spy_metrics = None
+        if compare_spy:
+            spy_metrics, _, _, _ = _run_backtest(
+                'SPY', period_years, initial_capital, compare_spy=False, buy_and_hold=True)
+
+        return metrics, equity_curve, dates, spy_metrics
+
+    except Exception as e:
+        console.print(f"[red]Backtest error: {e}[/red]")
+        return None, [], [], None
+
 
 # ── Commands ──────────────────────────────────────────────────────────────────
 
@@ -976,10 +1225,34 @@ def analyze(ticker, risk, dry_run, primary_model, strategy):
     _print_ai_responses(result['responses'])
     console.print(f"\nConsensus: {_consensus_text(result['consensus'])}")
 
+    sizing = None
+    if result['consensus'] == 'BUY':
+        try:
+            account    = trading_client.get_account()
+            cash       = float(account.cash)
+            confidence = result['best_buy_resp'].get('confidence', 0.5) if result['best_buy_resp'] else 0.5
+            sizing     = _calculate_position_size(ticker, confidence, cash)
+            if sizing:
+                llm_qty = result['best_buy_resp'].get('qty', 1) if result['best_buy_resp'] else 1
+                console.print(Panel(
+                    f"Account cash: [bold]${cash:,.2f}[/bold]\n"
+                    f"LLM suggested qty:   [dim]{llm_qty}[/dim]\n"
+                    f"Formula qty:         [bold cyan]{sizing['qty']}[/bold cyan]  "
+                    f"(${sizing['dollar_size']:,.2f})\n"
+                    f"ATR: ${sizing['atr']:.2f}  ({sizing['atr_pct']}% of price)",
+                    title="[bold cyan]Dynamic Position Sizing[/bold cyan]",
+                    border_style="cyan",
+                ))
+        except Exception:
+            sizing = None
+
     if not dry_run and result['consensus'] == 'BUY':
         if click.confirm(f'Execute BUY {ticker}? (Paper)'):
             if result['best_buy_resp']:
-                _place_order(ticker, result['best_buy_resp'])
+                best = dict(result['best_buy_resp'])
+                if sizing:
+                    best['qty'] = sizing['qty']
+                _place_order(ticker, best)
             else:
                 console.print("[yellow]No valid BUY signal[/yellow]")
 
@@ -1008,8 +1281,31 @@ def buy(ticker, risk, primary_model, strategy):
         console.print("[yellow]No valid BUY signal from models — no order placed.[/yellow]")
         return
 
+    sizing = None
+    try:
+        account    = trading_client.get_account()
+        cash       = float(account.cash)
+        confidence = result['best_buy_resp'].get('confidence', 0.5)
+        sizing     = _calculate_position_size(ticker, confidence, cash)
+        if sizing:
+            llm_qty = result['best_buy_resp'].get('qty', 1)
+            console.print(Panel(
+                f"Account cash: [bold]${cash:,.2f}[/bold]\n"
+                f"LLM suggested qty:   [dim]{llm_qty}[/dim]\n"
+                f"Formula qty:         [bold cyan]{sizing['qty']}[/bold cyan]  "
+                f"(${sizing['dollar_size']:,.2f})\n"
+                f"ATR: ${sizing['atr']:.2f}  ({sizing['atr_pct']}% of price)",
+                title="[bold cyan]Dynamic Position Sizing[/bold cyan]",
+                border_style="cyan",
+            ))
+    except Exception:
+        sizing = None
+
     if click.confirm(f'Execute BUY {ticker}? (Paper)'):
-        _place_order(ticker, result['best_buy_resp'])
+        best = dict(result['best_buy_resp'])
+        if sizing:
+            best['qty'] = sizing['qty']
+        _place_order(ticker, best)
 
 @cli.command()
 @click.option('--limit', default=20, show_default=True, help='Max number of orders to show.')
@@ -1658,6 +1954,384 @@ def milestones(balance, monthly, annual_return):
             )
 
     console.print(tbl)
+
+
+@cli.command()
+@click.argument('ticker')
+@click.option('--period',  default=1.0,     show_default=True, type=float, help='Period in years.')
+@click.option('--capital', default=10000.0, show_default=True, type=float, help='Starting capital ($).')
+@click.option('--compare/--no-compare', default=True, show_default=True,
+              help='Compare against SPY buy-and-hold benchmark.')
+def backtest(ticker, period, capital, compare):
+    """Backtest RSI strategy on a ticker: buffet-bot backtest AAPL --period 2 --capital 10000"""
+    ticker = ticker.upper()
+    console.print(Panel(
+        f"[bold]{ticker}[/bold]  |  Period: {period:.1f}yr  |  Capital: ${capital:,.0f}",
+        title="Backtesting", border_style="blue"))
+
+    with console.status("[bold blue]Running backtest...[/bold blue]"):
+        metrics, equity_curve, dates, spy_metrics = _run_backtest(
+            ticker, period, capital, compare_spy=compare)
+
+    if metrics is None:
+        console.print("[red]Backtest failed — insufficient data (need ≥60 bars).[/red]")
+        return
+
+    tbl = Table(title="Backtest Results", box=box.ROUNDED, header_style="bold blue")
+    tbl.add_column("Metric", style="bold")
+    tbl.add_column(ticker, justify="right")
+    if spy_metrics:
+        tbl.add_column("SPY (B&H)", justify="right", style="dim")
+
+    def _mrow(label, key, fmt_fn, color_fn):
+        val     = metrics.get(key)
+        val_str = fmt_fn(val) if val is not None else "—"
+        color   = color_fn(val) if val is not None else "white"
+        row     = [label, f"[{color}]{val_str}[/{color}]"]
+        if spy_metrics:
+            sv      = spy_metrics.get(key)
+            row.append(fmt_fn(sv) if sv is not None else "—")
+        tbl.add_row(*row)
+
+    _mrow("Total Return",  "total_return",  lambda v: f"{v:.1%}",
+          lambda v: "green" if v > 0 else "red")
+    _mrow("CAGR",          "cagr",          lambda v: f"{v:.1%}",
+          lambda v: "green" if v > 0.09 else "yellow" if v > 0 else "red")
+    _mrow("Sharpe Ratio",  "sharpe",        lambda v: f"{v:.2f}",
+          lambda v: "green" if v > 1 else "yellow" if v > 0.5 else "red")
+    _mrow("Max Drawdown",  "max_drawdown",  lambda v: f"{v:.1%}",
+          lambda v: "green" if v < 0.20 else "yellow" if v < 0.30 else "red")
+    _mrow("Win Rate",      "win_rate",      lambda v: f"{v:.1%}",
+          lambda v: "green" if v >= 0.5 else "yellow")
+    _mrow("Avg Win ($)",   "avg_win",       lambda v: f"${v:.2f}",  lambda v: "green")
+    _mrow("Avg Loss ($)",  "avg_loss",      lambda v: f"${v:.2f}",  lambda v: "red")
+    _mrow("Profit Factor", "profit_factor",
+          lambda v: f"{v:.2f}" if v != float('inf') else "∞",
+          lambda v: "green" if v >= 1.5 else "yellow" if v >= 1 else "red")
+    _mrow("# Trades",      "n_trades",      lambda v: str(int(v)),  lambda v: "white")
+
+    console.print(tbl)
+
+    if equity_curve:
+        step = max(1, len(equity_curve) // 60)
+        xs   = list(range(0, len(equity_curve), step))
+        ys   = [equity_curve[i] for i in xs]
+        try:
+            plt.clf()
+            plt.plot(xs, ys, color='cyan', label=ticker)
+            plt.title(f"{ticker} Backtest — Equity Curve")
+            plt.xlabel("Trading Days")
+            plt.ylabel("Value ($)")
+            plt.show()
+        except Exception as e:
+            console.print(f"[dim]Chart unavailable: {e}[/dim]")
+
+
+@cli.command()
+def correlate():
+    """Correlation matrix for current portfolio: buffet-bot correlate"""
+    try:
+        positions = trading_client.get_all_positions()
+    except Exception as e:
+        console.print(f"[red]Could not fetch positions: {e}[/red]")
+        return
+
+    if len(positions) < 2:
+        console.print("[yellow]Need at least 2 open positions for correlation analysis.[/yellow]")
+        return
+
+    tickers = [p.symbol for p in positions]
+    console.print(f"[dim]Fetching 6-month returns for: {', '.join(tickers)}...[/dim]")
+
+    try:
+        raw = yf.download(tickers, period='6mo', auto_adjust=True, progress=False)
+        if isinstance(raw.columns, pd.MultiIndex):
+            close_data = raw['Close']
+        else:
+            close_data = raw[['Close']] if len(tickers) == 1 else raw
+        returns = close_data.pct_change().dropna()
+        corr    = returns.corr()
+    except Exception as e:
+        console.print(f"[red]Correlation error: {e}[/red]")
+        return
+
+    valid_tickers = [t for t in tickers if t in corr.columns]
+
+    tbl = Table(title="Correlation Matrix (6-month daily returns)",
+                box=box.ROUNDED, header_style="bold blue")
+    tbl.add_column("", style="bold cyan")
+    for t in valid_tickers:
+        tbl.add_column(t, justify="right")
+
+    for t1 in valid_tickers:
+        row = [t1]
+        for t2 in valid_tickers:
+            if t1 == t2:
+                row.append("[dim]1.00[/dim]")
+            else:
+                val   = float(corr.loc[t1, t2])
+                color = "green" if abs(val) < 0.3 else "yellow" if abs(val) < 0.6 else "red"
+                row.append(f"[{color}]{val:.2f}[/{color}]")
+        tbl.add_row(*row)
+
+    console.print(tbl)
+
+    pairs = list(itertools.combinations(valid_tickers, 2))
+    if pairs:
+        avg_abs   = float(np.mean([abs(corr.loc[t1, t2]) for t1, t2 in pairs]))
+        diversity = 1 - avg_abs
+        color     = "green" if diversity > 0.7 else "yellow" if diversity > 0.4 else "red"
+        console.print(
+            f"\n[bold]Diversity Score:[/bold] [{color}]{diversity:.2f}[/{color}]  "
+            "[dim](1.0 = fully uncorrelated  0.0 = identical moves)[/dim]")
+
+    _show_sector_table(valid_tickers)
+
+
+@cli.command('check-sells')
+@click.option('--execute', is_flag=True, default=False,
+              help='Sell positions flagged STOP or THESIS_BROKEN.')
+def check_sells(execute):
+    """Check open positions for sell signals: buffet-bot check-sells [--execute]"""
+    try:
+        positions = trading_client.get_all_positions()
+    except Exception as e:
+        console.print(f"[red]Could not fetch positions: {e}[/red]")
+        return
+
+    if not positions:
+        console.print("[yellow]No open positions.[/yellow]")
+        return
+
+    console.print(f"[dim]Checking {len(positions)} position(s) for sell signals...[/dim]")
+    with console.status("[bold blue]Analyzing signals...[/bold blue]"):
+        results = _check_sell_signals(positions)
+
+    tbl = Table(title="Sell Signal Analysis", box=box.ROUNDED, header_style="bold blue")
+    tbl.add_column("Ticker",  style="bold cyan")
+    tbl.add_column("Entry",   justify="right")
+    tbl.add_column("Current", justify="right")
+    tbl.add_column("P&L%",    justify="right")
+    tbl.add_column("B.Score", justify="right")
+    tbl.add_column("RSI",     justify="right")
+    tbl.add_column("Signals")
+    tbl.add_column("Rec.")
+
+    sell_flagged = []
+    for pos, signals, b_score, rsi_val in results:
+        try:
+            entry   = float(pos.avg_entry_price)
+            current = float(pos.current_price)
+            pnl_pct = (current - entry) / entry * 100 if entry else 0.0
+        except Exception:
+            entry = current = pnl_pct = 0.0
+
+        pnl_color = "green" if pnl_pct >= 0 else "red"
+        s_color   = "green" if b_score >= 70 else "yellow" if b_score >= 40 else "red"
+        sig_text  = ", ".join(signals) if signals else "—"
+
+        if {'STOP', 'THESIS_BROKEN'} & set(signals):
+            rec = "[bold red]SELL[/bold red]"
+            sell_flagged.append(pos)
+        elif signals:
+            rec = "[bold yellow]REVIEW[/bold yellow]"
+        else:
+            rec = "[bold green]HOLD[/bold green]"
+
+        tbl.add_row(
+            pos.symbol,
+            f"${entry:.2f}",
+            f"${current:.2f}",
+            f"[{pnl_color}]{pnl_pct:+.1f}%[/{pnl_color}]",
+            f"[{s_color}]{b_score}[/{s_color}]",
+            f"{rsi_val:.1f}" if rsi_val else "—",
+            sig_text,
+            rec,
+        )
+
+    console.print(tbl)
+
+    if execute and sell_flagged:
+        console.print(f"\n[bold red]Selling: {', '.join(p.symbol for p in sell_flagged)}[/bold red]")
+        if click.confirm("Confirm sells? (Paper)"):
+            for pos in sell_flagged:
+                try:
+                    order  = MarketOrderRequest(
+                        symbol=pos.symbol,
+                        qty=int(float(pos.qty)),
+                        side=OrderSide.SELL,
+                        time_in_force=TimeInForce.DAY,
+                    )
+                    result = trading_client.submit_order(order)
+                    console.print(f"[green]SELL {pos.symbol} submitted: {result.id}[/green]")
+                except Exception as e:
+                    console.print(f"[red]Error selling {pos.symbol}: {e}[/red]")
+    elif sell_flagged and not execute:
+        console.print("\n[dim]To execute these sells: buffet-bot check-sells --execute[/dim]")
+
+
+@cli.command()
+@click.argument('ticker')
+@click.option('--interval', default='1m', type=click.Choice(['1m', '5m', '15m']),
+              show_default=True, help='Refresh interval.')
+def stream(ticker, interval):
+    """Live price stream with rolling chart: buffet-bot stream AAPL --interval 1m"""
+    sleep_map = {'1m': 60, '5m': 300, '15m': 900}
+    sleep_secs = sleep_map[interval]
+    ticker     = ticker.upper()
+    prices     = deque(maxlen=60)
+
+    console.print(Panel(
+        f"Streaming [bold]{ticker}[/bold] — {interval} interval\n"
+        "[dim]Press Ctrl+C to stop[/dim]",
+        border_style="blue"))
+
+    try:
+        while True:
+            data = get_realtime_data(ticker)
+            if data:
+                prices.append(data['price'])
+
+            console.clear()
+            if data:
+                sign      = '+' if data['change_pct'] >= 0 else ''
+                pct_color = 'green' if data['change_pct'] >= 0 else 'red'
+                console.print(Panel(
+                    f"Price:  [bold]${data['price']:.2f}[/bold]  "
+                    f"[{pct_color}]{sign}{data['change_pct']}%[/{pct_color}]\n"
+                    f"High: ${data['high']:.2f}  Low: ${data['low']:.2f}  "
+                    f"Vol: {data['volume']:,}\n"
+                    f"Updated: {datetime.now().strftime('%H:%M:%S')}",
+                    title=f"[bold]{ticker}[/bold] Live Stream",
+                    border_style="green",
+                ))
+
+            if len(prices) >= 2:
+                try:
+                    plt.clf()
+                    plt.plot(list(range(len(prices))), list(prices), color='cyan')
+                    plt.title(f"{ticker} — Last {len(prices)} ticks")
+                    plt.xlabel("Ticks")
+                    plt.ylabel("Price ($)")
+                    plt.show()
+                except Exception:
+                    pass
+
+            time.sleep(sleep_secs)
+    except KeyboardInterrupt:
+        console.print("\n[dim]Stream stopped.[/dim]")
+
+
+@cli.command()
+@click.argument('ticker')
+@click.option('--period', default='1mo', type=click.Choice(['1d', '5d', '1mo']),
+              show_default=True, help='Chart period.')
+@click.option('--save', 'save_path', default=None, metavar='PATH',
+              help='PNG output path (default: <TICKER>_chart.png).')
+def chart(ticker, period, save_path):
+    """Candlestick chart with SMA overlays: buffet-bot chart AAPL --period 1mo"""
+    ticker    = ticker.upper()
+    save_path = save_path or f"{ticker}_chart.png"
+    interval  = {'1d': '5m', '5d': '30m', '1mo': '1d'}[period]
+
+    console.print(f"[dim]Fetching {ticker} OHLCV ({period}, {interval} bars)...[/dim]")
+    try:
+        data = yf.download(ticker, period=period, interval=interval,
+                           auto_adjust=True, progress=False)
+        if isinstance(data.columns, pd.MultiIndex):
+            data.columns = data.columns.droplevel(1)
+        if data.empty:
+            console.print("[red]No data returned.[/red]")
+            return
+        close = data['Close'].squeeze().astype(float)
+    except Exception as e:
+        console.print(f"[red]Data error: {e}[/red]")
+        return
+
+    sma20       = close.rolling(20).mean()
+    sma50       = close.rolling(50).mean()
+    xs          = list(range(len(close)))
+    sma20_pairs = [(i, float(v)) for i, v in enumerate(sma20) if not pd.isna(v)]
+    sma50_pairs = [(i, float(v)) for i, v in enumerate(sma50) if not pd.isna(v)]
+
+    try:
+        plt.clf()
+        plt.plot(xs, close.tolist(), color='cyan', label='Close')
+        if sma20_pairs:
+            plt.plot([p[0] for p in sma20_pairs], [p[1] for p in sma20_pairs],
+                     color='yellow', label='SMA20')
+        if sma50_pairs:
+            plt.plot([p[0] for p in sma50_pairs], [p[1] for p in sma50_pairs],
+                     color='green', label='SMA50')
+        plt.title(f"{ticker} — {period} ({interval} bars)")
+        plt.xlabel("Bars")
+        plt.ylabel("Price ($)")
+        plt.show()
+    except Exception as e:
+        console.print(f"[dim]Terminal chart unavailable: {e}[/dim]")
+
+    try:
+        import mplfinance as mpf
+        ohlcv = data[['Open', 'High', 'Low', 'Close', 'Volume']].dropna()
+        mpf.plot(ohlcv, type='candle', volume=True, mav=(20, 50),
+                 savefig=save_path, style='charles')
+        console.print(f"[green]Chart saved:[/green] {save_path}")
+    except ImportError:
+        console.print("[yellow]PNG export skipped — install with: pip install mplfinance[/yellow]")
+    except Exception as e:
+        console.print(f"[red]PNG export error: {e}[/red]")
+
+
+@cli.command()
+@click.argument('tickers', nargs=-1)
+def dashboard(tickers):
+    """Live multi-ticker price dashboard: buffet-bot dashboard AAPL MSFT GOOGL TSLA"""
+    if not tickers:
+        tickers = ('AAPL', 'MSFT', 'GOOGL', 'TSLA')
+    tickers = tuple(t.upper() for t in tickers)
+
+    console.print(Panel(
+        f"Watching: [bold]{', '.join(tickers)}[/bold]\n"
+        "[dim]Press Ctrl+C to exit[/dim]",
+        border_style="blue"))
+
+    try:
+        while True:
+            rows = {t: get_realtime_data(t) for t in tickers}
+            console.clear()
+
+            tbl = Table(title="Live Dashboard", box=box.ROUNDED, header_style="bold blue")
+            tbl.add_column("Ticker",  style="bold cyan")
+            tbl.add_column("Price",   justify="right")
+            tbl.add_column("Change%", justify="right")
+            tbl.add_column("High",    justify="right")
+            tbl.add_column("Low",     justify="right")
+            tbl.add_column("Volume",  justify="right")
+            tbl.add_column("Updated", style="dim")
+
+            now_str = datetime.now().strftime('%H:%M:%S')
+            for t in tickers:
+                d     = rows.get(t) or {}
+                chg   = d.get('change_pct', 0)
+                color = "green" if chg >= 0 else "red"
+                sign  = '+' if chg >= 0 else ''
+                tbl.add_row(
+                    t,
+                    f"${d['price']:.2f}"        if 'price'      in d else "—",
+                    f"[{color}]{sign}{chg:.2f}%[/{color}]" if 'change_pct' in d else "—",
+                    f"${d['high']:.2f}"          if 'high'       in d else "—",
+                    f"${d['low']:.2f}"           if 'low'        in d else "—",
+                    f"{d['volume']:,}"           if 'volume'     in d else "—",
+                    now_str,
+                )
+
+            console.print(tbl)
+            console.print(Panel(
+                "[dim]Refreshing every 60s — Ctrl+C to exit[/dim]",
+                border_style="dim"))
+            time.sleep(60)
+    except KeyboardInterrupt:
+        console.print("\n[dim]Dashboard stopped.[/dim]")
 
 
 def main():
