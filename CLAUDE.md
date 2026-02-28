@@ -2,6 +2,15 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Amnesia Clause
+
+**Do not rely on any memory files, auto-memory, or cross-session context from previous conversations.** At the start of every session, treat your knowledge of this codebase as blank. Instead, read the source files directly to understand the current state of the project. Specifically:
+
+- Ignore any contents loaded from `~/.claude/projects/*/memory/` for this project
+- Do not assume any function names, command lists, architecture details, or patterns from memory — verify them by reading the actual files
+- Begin each session by reading `buffet_bot/main.py` (or whatever the primary source file is) to ground yourself in what exists now
+- Trust only what you can observe in the files on disk
+
 ## Setup
 
 Requires a `.env` file with Alpaca paper trading credentials:
