@@ -1,0 +1,115 @@
+# Buffet-Bot Roadmap
+
+> Managed by: Product Manager Agent
+> Last updated: 2026-02-28
+> Current version: v0.4.0
+
+---
+
+## How to Read This File
+
+- Labels: `[PM]` `[ENG]` `[ARCH]` `[STYLE]` `[SCRAPER]` — which agent owns it
+- Status: `[ ]` pending · `[~]` in progress · `[x]` done
+- Milestone: v0.4.0 · v0.5.0 · v1.0.0
+
+---
+
+## v0.4.0 — Crypto, Politician Intelligence, Volatile Scanner, Multi-Account ✅ SHIPPED
+
+### Crypto
+- [x] [ENG] `buffet_bot/crypto.py` — Alpaca crypto bars/quotes/volatility, Coinbase Advanced Trade orders
+- [x] [ENG] `crypto [SYMBOL]` command — live dashboard for all 8 pairs, or full LLM analysis + optional order
+- [x] [ENG] `analyze` auto-detects crypto symbols (BTC/USD etc.) and routes to crypto flow
+
+### Politician Intelligence
+- [x] [ENG] `buffet_bot/politicians.py` — House Stock Watcher S3 + FMP API, merge/dedup
+- [x] [ENG] `news <TICKER>` command — Alpaca headlines + congressional trades + short interest + AI summary
+
+### Volatile Scanner
+- [x] [ENG] `buffet_bot/volatile.py` — 75-ticker universe, 0–100 score (beta/mktcap/short%/30d-vol)
+- [x] [ENG] `volatile` command — concurrent ThreadPoolExecutor scan, `--n` and `--universe` flags
+
+### Multi-Account
+- [x] [ENG] `buffet_bot/ibkr.py` — synchronous IBKR EWrapper/EClient wrapper, account summary + orders
+- [x] [ENG] `status` shows 3 panels: Alpaca paper + Coinbase + IBKR (all gracefully degrade if unconfigured)
+
+### Architecture
+- [x] [ARCH+ENG] Module split executed: `politicians.py`, `crypto.py`, `volatile.py`, `ibkr.py`
+- [x] [ENG] `scan` replaced serial `time.sleep(1)` loop with `ThreadPoolExecutor` concurrent fetch
+- [x] [ENG] `asyncio` + `concurrent.futures` imported into main.py for future async speedup
+
+---
+
+## v0.4.1 — Data Expansion + UX Polish (Next Up)
+
+### Intelligence
+- [ ] [SCRAPER+ENG] SEC EDGAR Form 4 insider transaction fetcher + `insiders` command
+- [ ] [SCRAPER+ENG] FRED macro indicators injected into LLM prompt (yield curve, CPI, fed rate)
+- [ ] [SCRAPER+ENG] Earnings calendar integration — show upcoming earnings date in `analyze`
+- [ ] [ENG] Options chain basic display — put/call ratio, unusual volume flag
+
+### Portfolio
+- [ ] [ENG] `rebalance` command — compare actual allocation vs target, suggest trades
+- [ ] [ENG] Watchlist management — `watchlist add TSLA`, `watchlist remove TSLA`, `watchlist show`
+- [ ] [ENG] `alerts` command — set price/RSI thresholds, check on next run
+
+### UX
+- [ ] [STYLE] Rich progress spinners on all LLM queries (no more blank wait)
+- [ ] [STYLE] Buffett score color coding: green >70, yellow 40-70, red <40
+- [ ] [STYLE] `scan` output: sort by score, color-coded rows, compact layout
+- [ ] [STYLE] Add data source + timestamp footer to `analyze` output
+- [ ] [ENG] `--json` flag on `analyze` and `scan` for scripting output
+- [ ] [ENG] Shell autocomplete via `click-completion` or `argcomplete`
+
+### Architecture
+- [ ] [ARCH] Structural audit of main.py — identify further split candidates, document in AUDIT.md
+- [ ] [ARCH] Config file support: `~/.buffet-bot-config.toml` for watchlist + preferences
+
+---
+
+## v0.5.0 — Automation + Advanced Signals
+
+### Automation
+- [ ] [ENG] Cron-compatible `scan --notify` mode: output parseable for scripts/email
+- [ ] [ENG] `run-plan` scheduler: execute saved plans on a schedule
+- [ ] [ENG] `alerts check` command: evaluate all set alerts and report
+
+### Signals
+- [ ] [SCRAPER+ENG] Analyst consensus ratings (Nasdaq API or similar)
+- [ ] [ENG] Multi-timeframe analysis: 1d, 1w, 1mo signals combined
+- [ ] [ENG] Earnings surprise tracker: log beat/miss history in SQLite
+
+### Risk
+- [ ] [ENG] Beta-adjusted position sizing (replace or augment ATR Kelly)
+- [ ] [ENG] Portfolio VaR (Value at Risk) calculation — add to `portfolio` output
+- [ ] [ENG] Simulated tax-loss harvesting signal in `check-sells`
+
+---
+
+## v1.0.0 — Production-Grade CLI
+
+### Intelligence
+- [ ] [SCRAPER+ENG] SEC 10-K/10-Q filing fetcher — LLM summarizes key risks + financials
+- [ ] [ENG] Multi-LLM model selection: allow pulling and using any Ollama model
+- [ ] [ENG] Model performance tracking: log LLM recommendation outcomes in DB
+
+### Architecture
+- [ ] [ARCH+ENG] Full test suite with `pytest` — mock Alpaca and yfinance responses
+- [ ] [ARCH] DB migration system: versioned schema changes
+
+### Distribution
+- [ ] [PM+ENG] PyPI package: `pip install buffet-bot`
+- [ ] [ENG] Docker image with Ollama sidecar
+- [ ] [PM] Contribution guide and PR template
+
+---
+
+## Backlog (Unscheduled)
+
+- [ ] [ENG] Portfolio sector pie chart (plotext)
+- [ ] [ENG] `compare AAPL MSFT` — side-by-side Buffett score comparison
+- [ ] [SCRAPER] Reddit/WSB sentiment integration
+- [ ] [SCRAPER] Google Trends signal (pytrends)
+- [ ] [STYLE] Dark/light theme toggle (environment variable)
+- [ ] [ENG] `explain` command — ask LLM to explain a specific metric or concept
+- [ ] [PM] Public roadmap / GitHub Discussions
