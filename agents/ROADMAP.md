@@ -49,12 +49,12 @@
 - [ ] [ENG] Options chain basic display — put/call ratio, unusual volume flag
 
 ### Portfolio
-- [ ] [ENG] `rebalance` command — compare actual allocation vs target, suggest trades
+- [x] [ENG] `rebalance` command — compare actual allocation vs target, suggest trades
 - [x] [ENG] Watchlist management — `watchlist add TSLA`, `watchlist remove TSLA`, `watchlist show`
 - [x] [ENG] `alerts` command — set price/RSI thresholds, check on next run
 
 ### UX
-- [ ] [STYLE] Rich progress spinners on all LLM queries (no more blank wait)
+- [x] [STYLE] Rich progress spinners on all LLM queries (no more blank wait)
 - [ ] [STYLE] Buffett score color coding: green >70, yellow 40-70, red <40
 - [ ] [STYLE] `scan` output: sort by score, color-coded rows, compact layout
 - [ ] [STYLE] Add data source + timestamp footer to `analyze` output

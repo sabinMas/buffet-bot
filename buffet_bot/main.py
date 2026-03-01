@@ -463,11 +463,13 @@ def analyze_news_sentiment(news_items, ticker, primary_model):
         f"Headlines:\n{headlines}"
     )
     try:
-        resp = ollama.chat(
-            model=primary_model,
-            messages=[{'role': 'user', 'content': prompt}],
-            options={'temperature': 0.1},
-        )
+        color = MODEL_COLORS.get(primary_model, 'white')
+        with console.status(f"[{color}]Analyzing news sentiment ({primary_model})...[/{color}]"):
+            resp = ollama.chat(
+                model=primary_model,
+                messages=[{'role': 'user', 'content': prompt}],
+                options={'temperature': 0.1},
+            )
         content = resp['message']['content'].strip()
         start, end = content.find('{'), content.rfind('}') + 1
         if start < 0 or end <= start:
@@ -493,15 +495,17 @@ def _query_llms_freeform(prompt_text, primary_model):
 
     responses = {}
     for model in models_to_query:
-        try:
-            resp = ollama.chat(
-                model=model,
-                messages=[{'role': 'user', 'content': prompt_text}],
-                options={'temperature': 0.5},
-            )
-            responses[model] = resp['message']['content'].strip()
-        except Exception as e:
-            responses[model] = f"Error: {e}"
+        color = MODEL_COLORS.get(model, 'white')
+        with console.status(f"[{color}]Querying {model}...[/{color}]"):
+            try:
+                resp = ollama.chat(
+                    model=model,
+                    messages=[{'role': 'user', 'content': prompt_text}],
+                    options={'temperature': 0.5},
+                )
+                responses[model] = resp['message']['content'].strip()
+            except Exception as e:
+                responses[model] = f"Error: {e}"
     return responses
 
 def _run_analysis(ticker, risk, primary_model, strategy='value'):
@@ -565,16 +569,18 @@ def _run_analysis(ticker, risk, primary_model, strategy='value'):
 
     responses = {}
     for model in models_to_query:
-        try:
-            resp = ollama.chat(model=model, messages=[{'role': 'user', 'content': prompt}],
-                               options={'temperature': 0.2})
-            advice_str = resp['message']['content'].strip()
-            advice = json.loads(advice_str) if advice_str.startswith('{') else {'reason': advice_str}
-            responses[model] = advice
-        except json.JSONDecodeError:
-            responses[model] = {'error': 'Invalid JSON', 'raw': resp['message']['content']}
-        except Exception as e:
-            responses[model] = {'error': str(e)}
+        color = MODEL_COLORS.get(model, 'white')
+        with console.status(f"[{color}]Querying {model}...[/{color}]"):
+            try:
+                resp = ollama.chat(model=model, messages=[{'role': 'user', 'content': prompt}],
+                                   options={'temperature': 0.2})
+                advice_str = resp['message']['content'].strip()
+                advice = json.loads(advice_str) if advice_str.startswith('{') else {'reason': advice_str}
+                responses[model] = advice
+            except json.JSONDecodeError:
+                responses[model] = {'error': 'Invalid JSON', 'raw': resp['message']['content']}
+            except Exception as e:
+                responses[model] = {'error': str(e)}
 
     actions = [r.get('action', 'HOLD') for r in responses.values() if isinstance(r, dict) and 'action' in r]
     consensus = max(set(actions), key=actions.count) if actions else 'HOLD'
@@ -2774,6 +2780,109 @@ def volatile(n, universe):
     console.print(
         "[dim]Score weights: Beta 30 | Mkt Cap <$2B 25 | Short% 25 | 30d Vol 20[/dim]"
     )
+
+
+@cli.command()
+@click.option('--execute', is_flag=True, default=False,
+              help='Place paper orders to rebalance (buy only).')
+@click.option('--include-cash', is_flag=True, default=False,
+              help='Include available cash when computing target allocation.')
+def rebalance(execute, include_cash):
+    """Compare portfolio to equal-weight target and suggest trades: buffet-bot rebalance"""
+    try:
+        positions = trading_client.get_all_positions()
+        account   = trading_client.get_account()
+    except Exception as e:
+        console.print(f"[red]Could not fetch portfolio: {e}[/red]")
+        return
+
+    if not positions:
+        console.print("[yellow]No open positions to rebalance.[/yellow]")
+        return
+
+    cash = float(account.cash)
+    position_value = sum(float(p.market_value) for p in positions)
+    total_value = position_value + cash if include_cash else position_value
+
+    if total_value <= 0:
+        console.print("[red]Portfolio value is zero.[/red]")
+        return
+
+    n = len(positions)
+    target_pct = 1.0 / n
+    target_value = total_value * target_pct
+
+    table = Table(title="Rebalance Analysis (Equal Weight)", box=box.ROUNDED,
+                  header_style="bold cyan")
+    table.add_column("Ticker",   style="bold", no_wrap=True)
+    table.add_column("Current $",  justify="right")
+    table.add_column("Current %",  justify="right")
+    table.add_column("Target %",   justify="right")
+    table.add_column("Diff %",     justify="right")
+    table.add_column("Action")
+    table.add_column("Shares",     justify="right")
+
+    buys = []
+    for pos in sorted(positions, key=lambda p: float(p.market_value), reverse=True):
+        symbol     = pos.symbol
+        mkt_val    = float(pos.market_value)
+        price      = float(pos.current_price)
+        actual_pct = mkt_val / total_value
+        diff_pct   = actual_pct - target_pct
+        diff_val   = mkt_val - target_value
+        shares_delta = int(abs(diff_val) / price) if price > 0 else 0
+
+        if abs(diff_pct) < 0.01:          # within 1% — no action needed
+            action_cell  = "[dim]OK[/dim]"
+            shares_cell  = "—"
+            diff_color   = "dim"
+        elif diff_pct > 0:                 # overweight → trim
+            action_cell  = "[yellow]TRIM[/yellow]"
+            shares_cell  = f"[yellow]-{shares_delta}[/yellow]"
+            diff_color   = "yellow"
+        else:                              # underweight → add
+            action_cell  = "[green]ADD[/green]"
+            shares_cell  = f"[green]+{shares_delta}[/green]"
+            diff_color   = "green"
+            if shares_delta > 0 and execute:
+                buys.append((symbol, shares_delta, price))
+
+        table.add_row(
+            symbol,
+            f"${mkt_val:,.2f}",
+            f"[{diff_color}]{actual_pct:.1%}[/{diff_color}]",
+            f"{target_pct:.1%}",
+            f"[{diff_color}]{diff_pct:+.1%}[/{diff_color}]",
+            action_cell,
+            shares_cell,
+        )
+
+    console.print(Panel(
+        f"Positions: [bold]{n}[/bold]  |  "
+        f"Position value: [bold]${position_value:,.2f}[/bold]  |  "
+        f"Cash: [bold]${cash:,.2f}[/bold]  |  "
+        f"Target per position: [bold]${target_value:,.2f}[/bold] ({target_pct:.1%})",
+        title="Portfolio Summary", border_style="cyan",
+    ))
+    console.print(table)
+
+    if execute and buys:
+        console.print(f"\n[bold]Placing {len(buys)} buy order(s)...[/bold]")
+        for symbol, shares, price in buys:
+            if click.confirm(f"  BUY {shares}x {symbol} @ ~${price:.2f} (Paper)?", default=False):
+                try:
+                    order = MarketOrderRequest(
+                        symbol=symbol, qty=shares,
+                        side=OrderSide.BUY, time_in_force=TimeInForce.DAY,
+                    )
+                    result = trading_client.submit_order(order)
+                    console.print(f"  [green]Order submitted: {result.id}[/green]")
+                except Exception as e:
+                    console.print(f"  [red]Order error: {e}[/red]")
+    elif execute:
+        console.print("[dim]No ADD trades needed — portfolio is balanced.[/dim]")
+    else:
+        console.print("[dim]Dry run. Use --execute to place paper buy orders for ADD signals.[/dim]")
 
 
 @cli.group()
