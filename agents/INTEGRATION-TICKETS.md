@@ -54,7 +54,7 @@ Brief description.
 
 **Priority:** high
 **Assigned to:** Software Engineer
-**Status:** [~] in progress — PM assigned 2026-02-28
+**Status:** [x] implemented — 2026-03-01
 **Depends on:** `FRED_API_KEY` added to `.env` by user (free, no credit card)
 
 ### What to integrate
@@ -138,7 +138,7 @@ def _fetch_fred_data() -> dict:
 
 **Priority:** medium
 **Assigned to:** Software Engineer
-**Status:** [~] in progress — PM assigned 2026-02-28
+**Status:** [x] implemented — 2026-03-01
 **Depends on:** nothing (no API key required)
 
 ### What to integrate

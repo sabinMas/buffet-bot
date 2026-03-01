@@ -1493,6 +1493,16 @@ def analyze(ticker, risk, dry_run, primary_model, strategy, as_json):
         return
 
     _print_live_market(ticker, result['realtime'], result['news'])
+    earnings = _get_earnings_date(ticker)
+    if earnings:
+        days_away = (datetime.strptime(earnings['date'], '%Y-%m-%d') - datetime.utcnow()).days + 1
+        timing = earnings['time'].replace('time-', '').replace('-', ' ')
+        console.print(Panel(
+            f"[bold yellow]Earnings in {days_away} day(s)[/bold yellow] "
+            f"({timing}) — {earnings['fiscal_quarter']}  EPS est: {earnings['eps_forecast']}",
+            title="[bold yellow]Upcoming Earnings Warning[/bold yellow]",
+            border_style="yellow",
+        ))
     _print_ai_responses(result['responses'])
     console.print(f"\nConsensus: {_consensus_text(result['consensus'])}")
     data_src = result['realtime'].get('source', 'yfinance')
