@@ -1,7 +1,7 @@
 import os
 import json
-import asyncio
 import click
+import contextlib
 import requests
 from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1397,7 +1397,9 @@ def lookup(query):
 @click.option('--model', 'primary_model', default='deepseek-r1', type=click.Choice(MODELS))
 @click.option('--strategy', type=click.Choice(['value', 'growth', 'dividend', 'turnaround']),
               default='value', show_default=True, help='Investment strategy lens.')
-def analyze(ticker, risk, dry_run, primary_model, strategy):
+@click.option('--json', 'as_json', is_flag=True, default=False,
+              help='Output result as JSON (suppresses Rich output).')
+def analyze(ticker, risk, dry_run, primary_model, strategy, as_json):
     """Analyze stock or crypto: buffet-bot analyze AAPL / buffet-bot analyze BTC/USD"""
     ticker = ticker.upper()
 
@@ -1406,11 +1408,33 @@ def analyze(ticker, risk, dry_run, primary_model, strategy):
         _analyze_crypto(ticker, dry_run, primary_model)
         return
 
-    console.print(Panel(
-        f"[bold]{ticker}[/bold]  |  Risk: [yellow]{risk}[/yellow]  |  Strategy: [cyan]{strategy}[/cyan]",
-        title="Analyzing", border_style="blue"))
+    if not as_json:
+        console.print(Panel(
+            f"[bold]{ticker}[/bold]  |  Risk: [yellow]{risk}[/yellow]  |  Strategy: [cyan]{strategy}[/cyan]",
+            title="Analyzing", border_style="blue"))
 
     result = _run_analysis(ticker, risk, primary_model, strategy)
+
+    if as_json:
+        best = result.get('best_buy_resp') or {}
+        output = {
+            'ticker':        ticker,
+            'timestamp':     datetime.now(timezone.utc).isoformat(),
+            'consensus':     result['consensus'],
+            'confidence':    best.get('confidence'),
+            'qty':           best.get('qty'),
+            'stop_pct':      best.get('stop_pct'),
+            'reason':        best.get('reason'),
+            'buffett_score': result['buffett'].get('score'),
+            'price':         result['realtime'].get('price'),
+            'change_pct':    result['realtime'].get('change_pct'),
+            'sentiment':     result['sentiment'].get('overall'),
+            'models':        {m: r.get('action') for m, r in result['responses'].items()
+                              if isinstance(r, dict)},
+        }
+        click.echo(json.dumps(output, indent=2))
+        return
+
     _print_live_market(ticker, result['realtime'], result['news'])
     _print_ai_responses(result['responses'])
     console.print(f"\nConsensus: {_consensus_text(result['consensus'])}")
@@ -1673,18 +1697,22 @@ def chat(primary_model):
 @cli.command()
 @click.option('--watchlist', 'use_watchlist', is_flag=True, default=False,
               help='Scan your saved watchlist instead of the default tickers.')
-def scan(use_watchlist):
+@click.option('--json', 'as_json', is_flag=True, default=False,
+              help='Output results as JSON (suppresses Rich output).')
+def scan(use_watchlist, as_json):
     """Scan top stocks for Buffett opportunities"""
     default_tickers = ['AAPL', 'MSFT', 'GOOGL', 'BRK-B', 'JNJ', 'V', 'JPM', 'PG']
     if use_watchlist:
         saved = get_watchlist()
         tickers = [w['ticker'] for w in saved] if saved else default_tickers
-        if not saved:
+        if not saved and not as_json:
             console.print("[dim yellow]Watchlist is empty — using default tickers.[/dim yellow]")
     else:
         tickers = default_tickers
     scores = {}
-    with console.status("[bold blue]Scanning watchlist (concurrent)...[/bold blue]"):
+    scan_ctx = (console.status("[bold blue]Scanning watchlist (concurrent)...[/bold blue]")
+                if not as_json else contextlib.nullcontext())
+    with scan_ctx:
         with ThreadPoolExecutor(max_workers=len(tickers)) as pool:
             futures = {pool.submit(get_buffett_metrics, t): t for t in tickers}
             for fut in as_completed(futures):
@@ -1695,6 +1723,13 @@ def scan(use_watchlist):
                     scores[t] = 0
 
     top = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:5]
+
+    if as_json:
+        click.echo(json.dumps(
+            [{'ticker': t, 'buffett_score': s} for t, s in top],
+            indent=2,
+        ))
+        return
 
     table = Table(title="Top Buffett Scores", box=box.ROUNDED, header_style="bold blue")
     table.add_column("Ticker", style="bold cyan")

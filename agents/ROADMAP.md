@@ -58,12 +58,14 @@
 - [ ] [STYLE] Buffett score color coding: green >70, yellow 40-70, red <40
 - [ ] [STYLE] `scan` output: sort by score, color-coded rows, compact layout
 - [ ] [STYLE] Add data source + timestamp footer to `analyze` output
-- [ ] [ENG] `--json` flag on `analyze` and `scan` for scripting output
+- [x] [ENG] `--json` flag on `analyze` and `scan` for scripting output
 - [ ] [ENG] Shell autocomplete via `click-completion` or `argcomplete`
 
 ### Architecture
-- [ ] [ARCH] Structural audit of main.py — identify further split candidates, document in AUDIT.md
-- [ ] [ARCH] Config file support: `~/.buffet-bot-config.toml` for watchlist + preferences
+- [x] [ARCH] Structural audit of main.py — `agents/AUDIT.md` written; split candidates documented; SCHEMA.md + PATTERNS.md updated
+- [~] [ARCH] Config file design: `~/.buffet-bot-config.toml` — ADR-009 accepted; pending PM approval before ENG implements
+- [x] [ENG] Remove dead `asyncio` import (line 3, main.py) — flagged in AUDIT.md D-001
+- [ ] [ARCH+ENG] Migrate `_analyze_crypto()` from `main.py` to `crypto.py` — ADR-008 proposed, pending PM approval
 
 ---
 
