@@ -50,7 +50,7 @@
 
 ### Portfolio
 - [ ] [ENG] `rebalance` command — compare actual allocation vs target, suggest trades
-- [ ] [ENG] Watchlist management — `watchlist add TSLA`, `watchlist remove TSLA`, `watchlist show`
+- [x] [ENG] Watchlist management — `watchlist add TSLA`, `watchlist remove TSLA`, `watchlist show`
 - [ ] [ENG] `alerts` command — set price/RSI thresholds, check on next run
 
 ### UX

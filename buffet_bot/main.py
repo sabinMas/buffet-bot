@@ -123,6 +123,10 @@ def init_db():
             holding_days      INTEGER NOT NULL DEFAULT 0,
             outcome_note      TEXT    NOT NULL DEFAULT ''
         );
+        CREATE TABLE IF NOT EXISTS watchlist (
+            ticker   TEXT PRIMARY KEY,
+            added_at TEXT NOT NULL
+        );
     """)
     conn.commit()
     conn.close()
@@ -164,6 +168,41 @@ def get_recent_recommendations(days=30):
         ).description]
         conn.close()
         return [dict(zip(cols, row)) for row in rows]
+    except Exception:
+        return []
+
+def add_to_watchlist(ticker):
+    """Add a ticker to the persistent watchlist. Silent if already present."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute(
+            "INSERT OR IGNORE INTO watchlist (ticker, added_at) VALUES (?, ?)",
+            (ticker.upper(), datetime.now(timezone.utc).isoformat()),
+        )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+def remove_from_watchlist(ticker):
+    """Remove a ticker from the persistent watchlist."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("DELETE FROM watchlist WHERE ticker = ?", (ticker.upper(),))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+def get_watchlist():
+    """Return list of tickers in the watchlist, sorted alphabetically."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        rows = conn.execute(
+            "SELECT ticker, added_at FROM watchlist ORDER BY ticker"
+        ).fetchall()
+        conn.close()
+        return [{'ticker': r[0], 'added_at': r[1][:10]} for r in rows]
     except Exception:
         return []
 
@@ -1632,9 +1671,18 @@ def chat(primary_model):
                 histories[model].pop()  # remove unanswered user turn for this model
 
 @cli.command()
-def scan():
+@click.option('--watchlist', 'use_watchlist', is_flag=True, default=False,
+              help='Scan your saved watchlist instead of the default tickers.')
+def scan(use_watchlist):
     """Scan top stocks for Buffett opportunities"""
-    tickers = ['AAPL', 'MSFT', 'GOOGL', 'BRK-B', 'JNJ', 'V', 'JPM', 'PG']
+    default_tickers = ['AAPL', 'MSFT', 'GOOGL', 'BRK-B', 'JNJ', 'V', 'JPM', 'PG']
+    if use_watchlist:
+        saved = get_watchlist()
+        tickers = [w['ticker'] for w in saved] if saved else default_tickers
+        if not saved:
+            console.print("[dim yellow]Watchlist is empty — using default tickers.[/dim yellow]")
+    else:
+        tickers = default_tickers
     scores = {}
     with console.status("[bold blue]Scanning watchlist (concurrent)...[/bold blue]"):
         with ThreadPoolExecutor(max_workers=len(tickers)) as pool:
@@ -2715,6 +2763,43 @@ def volatile(n, universe):
     console.print(
         "[dim]Score weights: Beta 30 | Mkt Cap <$2B 25 | Short% 25 | 30d Vol 20[/dim]"
     )
+
+
+@cli.group()
+def watchlist():
+    """Manage your personal stock watchlist."""
+    pass
+
+@watchlist.command('add')
+@click.argument('ticker')
+def watchlist_add(ticker):
+    """Add a ticker to your watchlist: buffet-bot watchlist add TSLA"""
+    ticker = ticker.upper()
+    add_to_watchlist(ticker)
+    console.print(f"[green]Added [bold]{ticker}[/bold] to watchlist.[/green]")
+
+@watchlist.command('remove')
+@click.argument('ticker')
+def watchlist_remove(ticker):
+    """Remove a ticker from your watchlist: buffet-bot watchlist remove TSLA"""
+    ticker = ticker.upper()
+    remove_from_watchlist(ticker)
+    console.print(f"[yellow]Removed [bold]{ticker}[/bold] from watchlist.[/yellow]")
+
+@watchlist.command('show')
+def watchlist_show():
+    """Show all tickers in your watchlist: buffet-bot watchlist show"""
+    items = get_watchlist()
+    if not items:
+        console.print("[yellow]Your watchlist is empty. Add tickers with: buffet-bot watchlist add TSLA[/yellow]")
+        return
+    table = Table(title="My Watchlist", box=box.ROUNDED, header_style="bold cyan")
+    table.add_column("Ticker", style="bold", no_wrap=True)
+    table.add_column("Added", style="dim")
+    for item in items:
+        table.add_row(item['ticker'], item['added_at'])
+    console.print(table)
+    console.print(f"[dim]{len(items)} ticker(s). Scan with: buffet-bot scan --watchlist[/dim]")
 
 
 def main():
