@@ -641,6 +641,17 @@ def _consensus_text(consensus):
     color = {'BUY': 'green', 'SELL': 'red', 'HOLD': 'yellow'}.get(consensus, 'white')
     return f"[bold {color}]{consensus}[/bold {color}]"
 
+def _score_color(score):
+    """Return Rich color for a Buffett score, using config thresholds."""
+    disp = _CONFIG.get('display', {})
+    green_thresh  = disp.get('buffett_score_green',  70)
+    yellow_thresh = disp.get('buffett_score_yellow', 40)
+    if score >= green_thresh:
+        return 'green'
+    if score >= yellow_thresh:
+        return 'yellow'
+    return 'red'
+
 def _print_live_market(ticker, realtime, news):
     """Print a live market data panel and recent news table."""
     if realtime:
@@ -724,7 +735,7 @@ def _analyze_portfolio(tickers, budget, risk, primary_model):
         score = result['buffett']['score']
         consensus = result['consensus']
         c_color = {'BUY': 'green', 'SELL': 'red', 'HOLD': 'yellow'}.get(consensus, 'white')
-        s_color = "green" if score >= 70 else "yellow" if score >= 40 else "red"
+        s_color = _score_color(score)
 
         qty = 0
         confidence = '—'
@@ -1414,6 +1425,11 @@ def analyze(ticker, risk, dry_run, primary_model, strategy, as_json):
     _print_live_market(ticker, result['realtime'], result['news'])
     _print_ai_responses(result['responses'])
     console.print(f"\nConsensus: {_consensus_text(result['consensus'])}")
+    data_src = result['realtime'].get('source', 'yfinance')
+    console.print(
+        f"[dim]Analysis at {datetime.now().strftime('%Y-%m-%d %H:%M')} | "
+        f"Price via {data_src} | Risk: {risk} | Strategy: {strategy}[/dim]"
+    )
 
     sizing = None
     if result['consensus'] == 'BUY':
@@ -1679,9 +1695,11 @@ def chat(primary_model):
 @cli.command()
 @click.option('--watchlist', 'use_watchlist', is_flag=True, default=False,
               help='Scan your saved watchlist instead of the default tickers.')
+@click.option('--top', default=5, show_default=True, type=int,
+              help='Number of top results to show (0 = show all).')
 @click.option('--json', 'as_json', is_flag=True, default=False,
               help='Output results as JSON (suppresses Rich output).')
-def scan(use_watchlist, as_json):
+def scan(use_watchlist, top, as_json):
     """Scan top stocks for Buffett opportunities"""
     default_tickers = ['AAPL', 'MSFT', 'GOOGL', 'BRK-B', 'JNJ', 'V', 'JPM', 'PG']
     if use_watchlist:
@@ -1691,8 +1709,9 @@ def scan(use_watchlist, as_json):
             console.print("[dim yellow]Watchlist is empty — using default tickers.[/dim yellow]")
     else:
         tickers = default_tickers
-    scores = {}
-    scan_ctx = (console.status("[bold blue]Scanning watchlist (concurrent)...[/bold blue]")
+
+    all_metrics = {}
+    scan_ctx = (console.status("[bold blue]Scanning tickers (concurrent)...[/bold blue]")
                 if not as_json else contextlib.nullcontext())
     with scan_ctx:
         with ThreadPoolExecutor(max_workers=len(tickers)) as pool:
@@ -1700,28 +1719,53 @@ def scan(use_watchlist, as_json):
             for fut in as_completed(futures):
                 t = futures[fut]
                 try:
-                    scores[t] = fut.result().get('score', 0)
+                    all_metrics[t] = fut.result()
                 except Exception:
-                    scores[t] = 0
+                    all_metrics[t] = {'score': 0}
 
-    top = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:5]
+    ranked = sorted(all_metrics.items(), key=lambda x: x[1].get('score', 0), reverse=True)
+    if top > 0:
+        ranked = ranked[:top]
 
     if as_json:
         click.echo(json.dumps(
-            [{'ticker': t, 'buffett_score': s} for t, s in top],
+            [{'ticker': t, 'buffett_score': m.get('score', 0)} for t, m in ranked],
             indent=2,
         ))
         return
 
-    table = Table(title="Top Buffett Scores", box=box.ROUNDED, header_style="bold blue")
-    table.add_column("Ticker", style="bold cyan")
-    table.add_column("Buffett Score", justify="right")
+    scanned_at = datetime.now().strftime('%Y-%m-%d %H:%M')
+    table = Table(
+        title=f"Buffett Scan — {scanned_at}",
+        box=box.ROUNDED, header_style="bold blue",
+    )
+    table.add_column("Rank",  justify="right", style="dim")
+    table.add_column("Ticker", style="bold cyan", no_wrap=True)
+    table.add_column("Score",  justify="right")
+    table.add_column("ROE%",   justify="right")
+    table.add_column("Debt/Eq", justify="right")
+    table.add_column("OpMgn%", justify="right")
+    table.add_column("P/E",    justify="right")
 
-    for ticker, score in top:
-        color = "green" if score >= 70 else "yellow" if score >= 40 else "red"
-        table.add_row(ticker, f"[{color}]{score}[/{color}]")
+    for rank, (ticker, m) in enumerate(ranked, 1):
+        score  = m.get('score', 0)
+        color  = _score_color(score)
+        roe    = m.get('roe',      '—')
+        debt   = m.get('debt_eq', '—')
+        margin = m.get('op_margin','—')
+        pe     = m.get('pe',       '—')
+        table.add_row(
+            str(rank),
+            ticker,
+            f"[{color}]{score}[/{color}]",
+            f"{roe}" if isinstance(roe, str) else f"{roe:.1f}",
+            f"{debt}" if isinstance(debt, str) else f"{debt:.1f}",
+            f"{margin}" if isinstance(margin, str) else f"{margin:.1f}",
+            f"{pe}" if isinstance(pe, str) else f"{pe:.1f}",
+        )
 
     console.print(table)
+    console.print(f"[dim]Scanned {len(tickers)} tickers at {scanned_at}[/dim]")
 
 @cli.command()
 def status():
@@ -2390,7 +2434,7 @@ def check_sells(execute):
             entry = current = pnl_pct = 0.0
 
         pnl_color = "green" if pnl_pct >= 0 else "red"
-        s_color   = "green" if b_score >= 70 else "yellow" if b_score >= 40 else "red"
+        s_color   = _score_color(b_score)
         sig_text  = ", ".join(signals) if signals else "—"
 
         if {'STOP', 'THESIS_BROKEN'} & set(signals):

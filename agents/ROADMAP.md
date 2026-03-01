@@ -55,9 +55,9 @@
 
 ### UX
 - [x] [STYLE] Rich progress spinners on all LLM queries (no more blank wait)
-- [ ] [STYLE] Buffett score color coding: green >70, yellow 40-70, red <40
-- [ ] [STYLE] `scan` output: sort by score, color-coded rows, compact layout
-- [ ] [STYLE] Add data source + timestamp footer to `analyze` output
+- [x] [STYLE] Buffett score color coding: green >70, yellow 40-70, red <40
+- [x] [STYLE] `scan` output: sort by score, color-coded rows, compact layout
+- [x] [STYLE] Add data source + timestamp footer to `analyze` output
 - [x] [ENG] `--json` flag on `analyze` and `scan` for scripting output
 - [ ] [ENG] Shell autocomplete via `click-completion` or `argcomplete`
 
