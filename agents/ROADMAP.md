@@ -46,7 +46,7 @@
 - [ ] [SCRAPER+ENG] SEC EDGAR Form 4 insider transaction fetcher + `insiders` command
 - [ ] [SCRAPER+ENG] FRED macro indicators injected into LLM prompt (yield curve, CPI, fed rate)
 - [ ] [SCRAPER+ENG] Earnings calendar integration — show upcoming earnings date in `analyze`
-- [ ] [ENG] Options chain basic display — put/call ratio, unusual volume flag
+- [x] [ENG] Options chain basic display — put/call ratio, unusual volume flag
 
 ### Portfolio
 - [x] [ENG] `rebalance` command — compare actual allocation vs target, suggest trades

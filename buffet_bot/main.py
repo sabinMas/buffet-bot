@@ -3105,5 +3105,116 @@ def watchlist_show():
     console.print(f"[dim]{len(items)} ticker(s). Scan with: buffet-bot scan --watchlist[/dim]")
 
 
+@cli.command()
+@click.argument('ticker')
+@click.option('--expiry', default=None,
+              help='Expiration date (YYYY-MM-DD). Defaults to nearest available.')
+@click.option('--top', default=5, show_default=True, type=int,
+              help='Number of top-volume strikes to show per side.')
+def options(ticker, expiry, top):
+    """Options chain: put/call ratio, unusual volume, top strikes: buffet-bot options AAPL"""
+    ticker = ticker.upper()
+    try:
+        t = yf.Ticker(ticker)
+        expirations = t.options
+    except Exception as e:
+        console.print(f"[red]Could not fetch options for {ticker}: {e}[/red]")
+        return
+
+    if not expirations:
+        console.print(f"[yellow]No options data available for {ticker}.[/yellow]")
+        return
+
+    if expiry:
+        if expiry not in expirations:
+            console.print(f"[red]Expiry {expiry} not found. Available: {', '.join(expirations[:5])}...[/red]")
+            return
+        selected = expiry
+    else:
+        selected = expirations[0]
+
+    try:
+        chain = t.option_chain(selected)
+        calls = chain.calls.copy()
+        puts  = chain.puts.copy()
+    except Exception as e:
+        console.print(f"[red]Could not fetch chain for {selected}: {e}[/red]")
+        return
+
+    # Compute summary stats
+    call_vol  = int(calls['volume'].fillna(0).sum())
+    put_vol   = int(puts['volume'].fillna(0).sum())
+    pc_ratio  = put_vol / call_vol if call_vol > 0 else float('inf')
+    pc_color  = 'red' if pc_ratio > 1.2 else ('green' if pc_ratio < 0.8 else 'yellow')
+
+    # ATM IV — strike closest to current price
+    live = get_realtime_data(ticker)
+    spot = live.get('price', 0)
+    atm_iv = None
+    if spot and not calls.empty:
+        closest_idx = (calls['strike'] - spot).abs().idxmin()
+        atm_iv = calls.loc[closest_idx, 'impliedVolatility']
+
+    console.print(Panel(
+        f"Expiry: [bold]{selected}[/bold]  |  Spot: [bold]${spot:.2f}[/bold]  |  "
+        f"Call vol: [green]{call_vol:,}[/green]  |  "
+        f"Put vol: [red]{put_vol:,}[/red]  |  "
+        f"P/C ratio: [{pc_color}]{pc_ratio:.2f}[/{pc_color}]"
+        + (f"  |  ATM IV: [yellow]{atm_iv:.1%}[/yellow]" if atm_iv else ""),
+        title=f"[bold]{ticker}[/bold] Options Chain",
+        border_style="cyan",
+    ))
+
+    # Flag unusual volume — > 2× average volume for each side
+    def _unusual(df):
+        avg = df['volume'].fillna(0).mean()
+        return df['volume'].fillna(0) > max(avg * 2, 100)
+
+    calls['unusual'] = _unusual(calls)
+    puts['unusual']  = _unusual(puts)
+
+    def _chain_table(df, side, color):
+        top_df = df.nlargest(top, 'volume').copy()
+        tbl = Table(title=f"Top {top} {side} by Volume", box=box.ROUNDED,
+                    header_style=f"bold {color}")
+        tbl.add_column("Strike",  justify="right")
+        tbl.add_column("Last",    justify="right")
+        tbl.add_column("Bid/Ask", justify="right")
+        tbl.add_column("Volume",  justify="right")
+        tbl.add_column("OI",      justify="right")
+        tbl.add_column("IV",      justify="right")
+        tbl.add_column("ITM",     justify="center")
+        tbl.add_column("Flag",    justify="center")
+        for _, row in top_df.iterrows():
+            vol   = int(row.get('volume', 0) or 0)
+            oi    = int(row.get('openInterest', 0) or 0)
+            iv    = row.get('impliedVolatility', 0) or 0
+            itm   = '[bold green]ITM[/bold green]' if row.get('inTheMoney') else ''
+            flag  = '[bold yellow]UNUSUAL[/bold yellow]' if row.get('unusual') else ''
+            bid   = row.get('bid', 0) or 0
+            ask   = row.get('ask', 0) or 0
+            tbl.add_row(
+                f"${row['strike']:.2f}",
+                f"${row.get('lastPrice', 0):.2f}",
+                f"${bid:.2f}/${ask:.2f}",
+                f"[{color}]{vol:,}[/{color}]",
+                f"{oi:,}",
+                f"{iv:.1%}",
+                itm,
+                flag,
+            )
+        return tbl
+
+    console.print(_chain_table(calls, "Calls", "green"))
+    console.print(_chain_table(puts,  "Puts",  "red"))
+
+    pc_interp = (
+        "Bearish sentiment (more puts than calls)" if pc_ratio > 1.2
+        else "Bullish sentiment (more calls than puts)" if pc_ratio < 0.8
+        else "Neutral sentiment"
+    )
+    console.print(f"[dim]{pc_interp}  |  {len(expirations)} expiries available[/dim]")
+
+
 def main():
     cli()
