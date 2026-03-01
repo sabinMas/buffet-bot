@@ -6,6 +6,23 @@
 
 ---
 
+## Active Role Assignment
+
+> **FIRST AGENT EACH SESSION:** Read this block before choosing a role.
+> Pick the role listed under "Next session". Do not free-roam into Security Auditor
+> unless it is explicitly listed here — those items are gated to v1.0.0 pre-release.
+
+| Session | Role | Status |
+|---------|------|--------|
+| 1–5     | Engineer (v0.4.x) | complete |
+| 6       | Engineer (v0.5.0 staging) | complete |
+| **7 →** | **Engineer (v0.5.0 features)** | **next** |
+
+**Current milestone:** v0.5.0
+**Do NOT take Security Auditor** until v1.0.0 milestone is started.
+
+---
+
 ## Session Handoff Log
 
 ### 2026-03-01 — Engineer (session 6)
@@ -14,7 +31,8 @@
 - Fixed `pyproject.toml` version: `0.2.0` → `0.4.1` (was stale since v0.2.0)
 - Committed all untracked files: `buffet_bot/automate.py`, `buffet_bot/insiders.py`, `buffet_bot/universe.py`, `tests/` (4 test files)
 - Marked `alerts check` as complete in ROADMAP (was already implemented in main.py at line 3594)
-**Next agent should pick up:** Any open v0.5.0 item. Suggested targets:
+**Next agent role: Engineer (v0.5.0)** — do NOT take Security Auditor role; SEC items are deferred to v1.0.0 pre-release only.
+**Suggested targets:
 - `[PERF]` Concurrent FRED + Nasdaq HTTP in `_run_analysis()` — quick win, reduces wall time
 - `[ENG]` Beta-adjusted position sizing — augments `_calculate_position_size()` in analyze/buy
 - `[ENG]` Portfolio VaR — additive to `portfolio` command output

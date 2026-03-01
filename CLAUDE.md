@@ -2,6 +2,15 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Role Assignment Protocol
+
+**The first agent each session MUST read `agents/ROADMAP.md` → "Active Role Assignment" table before choosing a role.**
+
+- The assigned role is listed in the "Next session" row of that table
+- Do NOT self-select Security Auditor — that role is gated to v1.0.0 pre-release
+- After completing work, update the "Active Role Assignment" table to reflect the next session's role
+- Leave a dated entry in the "Session Handoff Log" section
+
 ## Amnesia Clause
 
 **Do not rely on any memory files, auto-memory, or cross-session context from previous conversations.** At the start of every session, treat your knowledge of this codebase as blank. Instead, read the source files directly to understand the current state of the project. Specifically:
