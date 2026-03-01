@@ -66,6 +66,15 @@ PLANS_DIR   = os.path.expanduser("~/.buffet-plans")
 DB_PATH     = os.path.expanduser("~/.buffet-bot.db")
 CONFIG_PATH = os.path.expanduser("~/.buffet-bot-config.toml")
 
+FRED_API_KEY = os.getenv('FRED_API_KEY', '')
+
+NASDAQ_EARNINGS_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Origin":     "https://www.nasdaq.com",
+    "Referer":    "https://www.nasdaq.com/",
+    "Accept":     "application/json, text/plain, */*",
+}
+
 STRATEGY_PROMPTS = {
     'value': (
         "Focus on Warren Buffett's classic value principles: high ROE, low debt, "
@@ -422,6 +431,58 @@ def get_realtime_data(ticker):
         console.print(f"[dim red]Live quote unavailable for {ticker}: {e}[/dim red]")
         return {}
 
+def _fetch_fred_data() -> dict:
+    """Fetch latest Fed rate, yield curve, and CPI from FRED. Returns {} if key missing."""
+    if not FRED_API_KEY:
+        return {}
+    series = {'DFF': 'fed_rate', 'T10Y2Y': 'yield_curve', 'CPIAUCSL': 'cpi'}
+    result = {}
+    for series_id, key in series.items():
+        try:
+            r = requests.get(
+                "https://api.stlouisfed.org/fred/series/observations",
+                params={
+                    'series_id': series_id,
+                    'api_key':   FRED_API_KEY,
+                    'file_type': 'json',
+                    'sort_order': 'desc',
+                    'limit': 1,
+                },
+                timeout=5,
+            )
+            r.raise_for_status()
+            val = r.json()['observations'][0]['value']
+            result[key] = float(val)   # raises ValueError on "." (missing data)
+        except Exception:
+            pass
+    return result
+
+def _get_earnings_date(ticker: str) -> dict | None:
+    """Check Nasdaq earnings calendar for the next 7 days. Returns dict or None."""
+    for days_ahead in range(8):
+        date_str = (datetime.utcnow() + timedelta(days=days_ahead)).strftime('%Y-%m-%d')
+        try:
+            r = requests.get(
+                "https://api.nasdaq.com/api/calendar/earnings",
+                params={"date": date_str},
+                headers=NASDAQ_EARNINGS_HEADERS,
+                timeout=5,
+            )
+            r.raise_for_status()
+            rows = r.json().get('data', {}).get('rows') or []
+            for row in rows:
+                if row.get('symbol', '').upper() == ticker.upper():
+                    return {
+                        'date':           date_str,
+                        'time':           row.get('time', ''),
+                        'eps_forecast':   row.get('epsForecast', ''),
+                        'fiscal_quarter': row.get('fiscalQuarterEnding', ''),
+                    }
+        except Exception:
+            pass
+        time.sleep(0.05)
+    return None
+
 def get_recent_news(ticker, limit=5):
     """Fetch recent news headlines from Alpaca News API."""
     try:
@@ -516,6 +577,7 @@ def _run_analysis(ticker, risk, primary_model, strategy='value'):
     realtime = get_realtime_data(ticker)
     news = get_recent_news(ticker)
     sentiment = analyze_news_sentiment(news, ticker, primary_model)
+    macro = _fetch_fred_data()
 
     # Live market block
     if realtime:
@@ -545,12 +607,20 @@ def _run_analysis(ticker, risk, primary_model, strategy='value'):
             f"(score: {s_sign}{sentiment['score']:.2f})"
         )
 
+    macro_block = ""
+    if macro:
+        macro_block = (
+            f"\nMacro context: Fed rate {macro.get('fed_rate', 'N/A')}%, "
+            f"yield curve (10Y-2Y) {macro.get('yield_curve', 'N/A')}%, "
+            f"CPI index {macro.get('cpi', 'N/A')}."
+        )
+
     strategy_guidance = STRATEGY_PROMPTS.get(strategy, STRATEGY_PROMPTS['value'])
 
     prompt = f"""
     Buffett Trading AI for {ticker} | Risk: {risk} | Strategy: {strategy.upper()}
     Buffett Score: {buffett['score']}/100 | ROE: {buffett.get('roe','?')}% | ROIC: {buffett.get('roic','?')}% | Debt/Eq: {buffett.get('debt_eq','?')} | OpMargin: {buffett.get('op_margin','?')}% | FCF Yield: {buffett.get('fcf_yield','?')}% | P/E: {buffett.get('pe','?')} | P/B: {buffett.get('pb','?')}
-    {live_block}{news_block}
+    {live_block}{news_block}{macro_block}
     Recent Prices (30d): {hist.to_dict()}
     Tech {'(RSI: ' + str(tech.get('rsi', 'N/A')) + ', MACD: ' + str(tech.get('macd', 'N/A')) + ')' if tech else ''}
 
@@ -558,7 +628,7 @@ def _run_analysis(ticker, risk, primary_model, strategy='value'):
 
     Additional rules:
     - Risk mgmt: Position <2% portfolio, stop-loss 3-7%
-    - Factor in the LIVE price and news sentiment score above
+    - Factor in the LIVE price, news sentiment, and macro context above
 
     JSON only: {{"action": "BUY|SELL|HOLD", "confidence": 0.85, "qty": 10, "reason": "2 sentences", "stop_pct": 0.05}}
     """
