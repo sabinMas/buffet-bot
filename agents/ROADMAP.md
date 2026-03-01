@@ -44,8 +44,8 @@
 
 ### Intelligence
 - [ ] [SCRAPER+ENG] SEC EDGAR Form 4 insider transaction fetcher + `insiders` command
-- [ ] [SCRAPER+ENG] FRED macro indicators injected into LLM prompt (yield curve, CPI, fed rate)
-- [ ] [SCRAPER+ENG] Earnings calendar integration — show upcoming earnings date in `analyze`
+- [~] [ENG] FRED macro indicators injected into LLM prompt — TICKET-001 assigned, spec in INTEGRATION-TICKETS.md
+- [~] [ENG] Earnings calendar integration — TICKET-002 assigned, spec in INTEGRATION-TICKETS.md
 - [x] [ENG] Options chain basic display — put/call ratio, unusual volume flag
 
 ### Portfolio
