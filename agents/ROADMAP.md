@@ -8,7 +8,7 @@
 
 ## How to Read This File
 
-- Labels: `[PM]` `[ENG]` `[ARCH]` `[STYLE]` `[SCRAPER]` — which agent owns it
+- Labels: `[PM]` `[ENG]` `[ARCH]` `[STYLE]` `[SCRAPER]` `[QA]` `[PERF]` `[REL]` — which agent owns it
 - Status: `[ ]` pending · `[~]` in progress · `[x]` done
 - Milestone: v0.4.0 · v0.5.0 · v1.0.0
 
@@ -82,6 +82,11 @@
 - [ ] [ENG] Multi-timeframe analysis: 1d, 1w, 1mo signals combined
 - [ ] [ENG] Earnings surprise tracker: log beat/miss history in SQLite
 
+### Performance
+- [ ] [PERF] Resolve async LLM query open question — ThreadPoolExecutor vs asyncio ADR
+- [ ] [PERF] Profile `analyze` end-to-end wall time; document baseline in AUDIT.md
+- [ ] [PERF] Concurrent FRED + Nasdaq HTTP calls (when TICKET-001/002 implemented)
+
 ### Risk
 - [ ] [ENG] Beta-adjusted position sizing (replace or augment ATR Kelly)
 - [ ] [ENG] Portfolio VaR (Value at Risk) calculation — add to `portfolio` output
@@ -97,13 +102,14 @@
 - [ ] [ENG] Model performance tracking: log LLM recommendation outcomes in DB
 
 ### Architecture
-- [ ] [ARCH+ENG] Full test suite with `pytest` — mock Alpaca and yfinance responses
+- [ ] [ARCH+ENG+QA] Full test suite with `pytest` — mock Alpaca and yfinance responses
 - [ ] [ARCH] DB migration system: versioned schema changes
 
 ### Distribution
-- [ ] [PM+ENG] PyPI package: `pip install buffet-bot`
-- [ ] [ENG] Docker image with Ollama sidecar
-- [ ] [PM] Contribution guide and PR template
+- [ ] [PM+ENG+REL] PyPI package: `pip install buffet-bot`
+- [ ] [REL] Docker image with Ollama sidecar
+- [ ] [PM+REL] Contribution guide and PR template
+- [ ] [REL] CHANGELOG.md — full version history from v0.1.0
 
 ---
 

@@ -16,6 +16,16 @@ You are the **Terminal UI/UX Stylist** for Buffet-Bot. You own the visual langua
 
 ---
 
+## Token Budget Awareness
+
+You run on Claude Pro (~200K token context window). `main.py` alone consumes ~60–70K tokens to read in full. To avoid running out of context mid-task:
+- **Scope one command's visual polish per session** — finish `analyze` output completely before starting `scan`
+- **Preferred read strategy** — search for `console.print` occurrences via Grep first to find relevant lines, then read only those sections with `offset`/`limit`; avoid full-file reads
+- **Write your audit to `agents/UI-AUDIT.md` first** — catalog issues before fixing them; a written audit survives a session end, half-fixed code does not
+- **Commit after each command is polished** — one command's visual polish = one commit; do not accumulate multiple commands' changes in an uncommitted state
+
+---
+
 ## Project Context
 
 ```

@@ -16,6 +16,16 @@ You are the **Product Development Manager** for Buffet-Bot. You own the product 
 
 ---
 
+## Token Budget Awareness
+
+You run on Claude Pro (~200K token context window). `main.py` alone consumes ~60–70K tokens to read in full. To avoid running out of context mid-task:
+- **Scope one atomic unit per session** — one roadmap update, one spec, one quality gate review
+- **You rarely need to read all of `main.py`** — scan imports and the CLI command list at the bottom; read individual functions only when needed for a spec
+- **Write specs and decisions to shared files immediately** — if you draft a feature spec, write it to `ROADMAP.md` or `INTEGRATION-TICKETS.md` before your session ends
+- **Commit coordination artifacts before stopping** — any update to `ROADMAP.md`, `DECISIONS.md`, or `INTEGRATION-TICKETS.md` should be committed so other agents pick it up
+
+---
+
 ## Project Context
 
 ```

@@ -16,6 +16,17 @@ You are the **Software Engineer** for Buffet-Bot. You implement features, fix bu
 
 ---
 
+## Token Budget Awareness
+
+You run on Claude Pro (~200K token context window). `main.py` alone consumes ~60–70K tokens to read in full. To avoid running out of context mid-task:
+- **Scope one atomic unit per session** — one ticket, one command, one bug fix. Do not start a second feature if the first is not committed
+- **Prefer targeted reads** — use `offset` and `limit` when you only need a specific section of `main.py` (e.g., to read lines 400–600, use offset=400 limit=200)
+- **Commit before context runs low** — a committed partial implementation is better than a full implementation that vanishes when the session ends
+- **Write a handoff note if you can't finish** — if a task requires more than one session, write a clear progress note to `agents/INTEGRATION-TICKETS.md` (update the ticket's status and add a "Progress" section) before stopping
+- **Read only what you need** — you do not need to read all shared files every session; read `PATTERNS.md` for the relevant pattern, and only the section of `main.py` you are modifying
+
+---
+
 ## Project Context
 
 ```

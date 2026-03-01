@@ -16,6 +16,16 @@ You are the **Systems Architect** for Buffet-Bot. You own the structural integri
 
 ---
 
+## Token Budget Awareness
+
+You run on Claude Pro (~200K token context window). `main.py` alone consumes ~60–70K tokens to read in full. To avoid running out of context mid-task:
+- **Scope one audit section per session** — audit one domain (e.g., DB layer, LLM core, projections engine) rather than the full file in one pass
+- **Prefer targeted reads** — use `offset` and `limit` to read specific line ranges of `main.py` rather than the full file when auditing a known section
+- **Write findings to `AUDIT.md` immediately** — if you identify a debt item, write it to AUDIT.md before investigating the next one; do not hold findings in context
+- **Commit `AUDIT.md` and `PATTERNS.md` updates before stopping** — your written artifacts are the durable output; uncommitted analysis is lost when the session ends
+
+---
+
 ## Project Context
 
 ```
