@@ -16,6 +16,7 @@ This directory contains instruction files for running multiple specialized Claud
 | `qa-engineer.md` | QA / Test Engineer | pytest suite, mocking, regression prevention |
 | `performance-engineer.md` | Performance Engineer | Concurrency, async LLM queries, profiling, speed |
 | `release-manager.md` | Release Manager | Versioning, PyPI packaging, Docker, CHANGELOG |
+| `security-auditor.md` | Security Auditor | Credential safety, SQL/shell injection, dependency CVEs, data exfiltration |
 
 ---
 
@@ -47,6 +48,9 @@ claude --system-prompt agents/performance-engineer.md
 
 # Terminal 8 — Release Manager
 claude --system-prompt agents/release-manager.md
+
+# Terminal 9 — Security Auditor
+claude --system-prompt agents/security-auditor.md
 ```
 
 > **Tip:** Each agent has an amnesia clause — it reads the source files fresh each session. This ensures agents don't act on stale assumptions. Let each agent read `buffet_bot/main.py` before giving it instructions.
@@ -63,6 +67,7 @@ claude --system-prompt agents/release-manager.md
 6. **QA / Test Engineer** writes tests after ENG ships a feature; runs regression suite before releases
 7. **Performance Engineer** profiles slow commands, resolves async open questions, optimizes concurrency
 8. **Release Manager** cuts releases, maintains `CHANGELOG.md`, manages PyPI and Docker packaging
+9. **Security Auditor** audits for credential leakage, injection risks, dependency CVEs, and data exfiltration before each release
 
 ---
 
@@ -79,7 +84,8 @@ claude --system-prompt agents/release-manager.md
 | `agents/INTEGRATION-TICKETS.md` | Data Scout → ENG | PM, ARCH |
 | `agents/UI-AUDIT.md` | Stylist | ENG, PM |
 | `CHANGELOG.md` | Release Manager | All agents |
-| `tests/` directory | QA Engineer | PERF, REL |
+| `tests/` directory | QA Engineer | PERF, REL, SEC |
+| `agents/SECURITY-AUDIT.md` | Security Auditor | PM, REL, ENG |
 
 ---
 

@@ -8,7 +8,7 @@
 
 ## How to Read This File
 
-- Labels: `[PM]` `[ENG]` `[ARCH]` `[STYLE]` `[SCRAPER]` `[QA]` `[PERF]` `[REL]` — which agent owns it
+- Labels: `[PM]` `[ENG]` `[ARCH]` `[STYLE]` `[SCRAPER]` `[QA]` `[PERF]` `[REL]` `[SEC]` — which agent owns it
 - Status: `[ ]` pending · `[~]` in progress · `[x]` done
 - Milestone: v0.4.0 · v0.5.0 · v1.0.0
 
@@ -104,6 +104,13 @@
 ### Architecture
 - [ ] [ARCH+ENG+QA] Full test suite with `pytest` — mock Alpaca and yfinance responses
 - [ ] [ARCH] DB migration system: versioned schema changes
+
+### Security
+- [ ] [SEC] Full credential handling audit — .gitignore, no hardcoded keys, no console leakage
+- [ ] [SEC+QA] SQL injection audit + test coverage for all DB operations
+- [ ] [SEC] Input validation audit — ticker path traversal, model name injection
+- [ ] [SEC] Dependency CVE scan (`pip-audit`) — fix any CVSS ≥7.0 before v1.0.0 release
+- [ ] [SEC] Data exfiltration audit — verify no cloud LLM calls exist in any code path
 
 ### Distribution
 - [ ] [PM+ENG+REL] PyPI package: `pip install buffet-bot`
