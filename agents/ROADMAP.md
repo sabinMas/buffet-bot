@@ -65,7 +65,7 @@
 - [x] [ARCH] Structural audit of main.py — `agents/AUDIT.md` written; split candidates documented; SCHEMA.md + PATTERNS.md updated
 - [x] [ENG] Config file: `~/.buffet-bot-config.toml` — ADR-009 implemented; `config show` / `config init` commands added
 - [x] [ENG] Remove dead `asyncio` import (line 3, main.py) — flagged in AUDIT.md D-001
-- [~] [ARCH+ENG] Migrate `_analyze_crypto()` from `main.py` to `crypto.py` — ADR-008 approved by PM 2026-02-28
+- [x] [ENG] Migrate `_analyze_crypto()` from `main.py` to `crypto.py` — ADR-008 implemented; main.py -131 lines
 
 ---
 

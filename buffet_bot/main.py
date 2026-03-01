@@ -30,6 +30,7 @@ from buffet_bot.crypto import (
     CRYPTO_SYMBOLS, is_crypto_symbol,
     get_crypto_bars, get_crypto_quote, get_crypto_volatility,
     init_coinbase, coinbase_market_buy, get_coinbase_balance,
+    analyze_crypto as _analyze_crypto,
 )
 from buffet_bot.volatile import scan_volatile, display_volatile_table, VOLATILE_UNIVERSE
 from buffet_bot.ibkr import get_ibkr_status, ibkr_market_order
@@ -1293,138 +1294,6 @@ def _run_backtest(ticker, period_years, initial_capital, compare_spy, buy_and_ho
         console.print(f"[red]Backtest error: {e}[/red]")
         return None, [], [], None
 
-
-# ── Crypto analysis helper ────────────────────────────────────────────────────
-
-def _analyze_crypto(symbol: str, dry_run: bool, primary_model: str) -> None:
-    """Full crypto analysis flow — data fetch, LLM consensus, optional Coinbase order."""
-    console.print(Panel(
-        f"[bold]{symbol}[/bold]  |  [dim]Crypto asset[/dim]",
-        title="Analyzing Crypto", border_style="yellow"))
-
-    with console.status(f"[bold yellow]Fetching crypto data for {symbol}...[/bold yellow]"):
-        quote   = get_crypto_quote(symbol)
-        vol     = get_crypto_volatility(symbol)
-        bars    = get_crypto_bars(symbol, days=30)
-
-    # Display live quote panel
-    if quote:
-        console.print(Panel(
-            f"Bid: [dim]${quote.get('bid', 0):,.6f}[/dim]  "
-            f"Ask: [dim]${quote.get('ask', 0):,.6f}[/dim]  "
-            f"Mid: [bold]${quote.get('mid', 0):,.6f}[/bold]",
-            title=f"[bold]{symbol}[/bold] Live Quote",
-            border_style="yellow",
-        ))
-    else:
-        console.print(f"[dim]Live quote unavailable for {symbol}[/dim]")
-
-    # Display volatility metrics
-    if vol:
-        return_color = "green" if vol.get("return_30d", 0) >= 0 else "red"
-        console.print(Panel(
-            f"30-day Return:       [{return_color}]{vol.get('return_30d', 0):+.1f}%[/{return_color}]\n"
-            f"Annualised Vol:      [yellow]{vol.get('vol_30d_annualized', 0):.1f}%[/yellow]\n"
-            f"Daily Std Dev:       {vol.get('daily_std', 0):.2f}%\n"
-            f"Max Drawdown (30d):  [red]{vol.get('max_drawdown', 0):.1f}%[/red]",
-            title="Volatility Metrics",
-            border_style="dim",
-        ))
-
-    # Build price history string for LLM
-    price_context = ""
-    if not bars.empty and "close" in bars.columns:
-        last5 = bars["close"].tail(5).round(6).tolist()
-        price_context = f"Last 5 closes: {last5}"
-
-    # LLM prompt adapted for crypto
-    prompt = f"""
-Crypto Trading AI — {symbol}
-Asset Type: Cryptocurrency
-{f"Mid Price: ${quote.get('mid', 0):,.6f}" if quote else ""}
-{f"30-day Return: {vol.get('return_30d', 0):+.1f}%" if vol else ""}
-{f"Annualised Volatility: {vol.get('vol_30d_annualized', 0):.1f}%" if vol else ""}
-{f"Max Drawdown (30d): {vol.get('max_drawdown', 0):.1f}%" if vol else ""}
-{price_context}
-
-Rules:
-- Crypto is highly volatile; size positions at max 2% of portfolio per trade
-- Use momentum + volatility context to inform action
-- Stop-loss at 8-15% for crypto (wider than equities)
-
-JSON only: {{"action": "BUY|SELL|HOLD", "confidence": 0.75, "usd_amount": 200, "reason": "2 sentences", "stop_pct": 0.10}}
-"""
-
-    models_to_query = [primary_model]
-    if primary_model != MODELS[1]:
-        models_to_query.append(MODELS[1])
-
-    responses = {}
-    for model in models_to_query:
-        try:
-            resp = ollama.chat(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                options={"temperature": 0.2},
-            )
-            content = resp["message"]["content"].strip()
-            start, end = content.find("{"), content.rfind("}") + 1
-            if start >= 0 and end > start:
-                responses[model] = json.loads(content[start:end])
-            else:
-                responses[model] = {"error": "No JSON", "raw": content[:200]}
-        except json.JSONDecodeError:
-            responses[model] = {"error": "Invalid JSON"}
-        except Exception as e:
-            responses[model] = {"error": str(e)}
-
-    _print_ai_responses(responses)
-
-    actions = [r.get("action", "HOLD") for r in responses.values()
-               if isinstance(r, dict) and "action" in r]
-    consensus = max(set(actions), key=actions.count) if actions else "HOLD"
-    console.print(f"\nConsensus: {_consensus_text(consensus)}")
-
-    if not dry_run and consensus == "BUY":
-        best = max(
-            (r for r in responses.values() if isinstance(r, dict) and r.get("action") == "BUY"),
-            key=lambda x: x.get("confidence", 0),
-            default=None,
-        )
-        if best is None:
-            console.print("[yellow]No valid BUY signal.[/yellow]")
-            return
-
-        usd_amount = float(best.get("usd_amount", 100))
-
-        # Route order: Coinbase if configured, else Alpaca paper crypto
-        cb_key = os.getenv("COINBASE_API_KEY")
-        broker = "Coinbase (live)" if cb_key else "Alpaca paper"
-        if click.confirm(f"Execute BUY ${usd_amount:.2f} of {symbol} via {broker}?"):
-            if cb_key:
-                try:
-                    result = coinbase_market_buy(symbol, usd_amount)
-                    console.print(f"[bold green]Coinbase order submitted:[/bold green] {result}")
-                except Exception as e:
-                    console.print(f"[red]Coinbase order error: {e}[/red]")
-            else:
-                # Alpaca paper crypto order
-                try:
-                    from alpaca.trading.requests import MarketOrderRequest as _MOR
-                    from alpaca.trading.enums import OrderSide as _OS, TimeInForce as _TIF
-                    alpaca_sym = symbol.replace("/", "")  # "BTCUSD"
-                    order = _MOR(
-                        symbol=alpaca_sym,
-                        notional=round(usd_amount, 2),
-                        side=_OS.BUY,
-                        time_in_force=_TIF.GTC,
-                    )
-                    result = trading_client.submit_order(order)
-                    console.print(f"[bold green]Alpaca paper crypto order: {result.id}[/bold green]")
-                except Exception as e:
-                    console.print(f"[red]Alpaca order error: {e}[/red]")
-
-
 # ── Commands ──────────────────────────────────────────────────────────────────
 
 @cli.command()
@@ -1506,7 +1375,7 @@ def analyze(ticker, risk, dry_run, primary_model, strategy, as_json):
 
     # ── Crypto routing ────────────────────────────────────────────────────────
     if is_crypto_symbol(ticker):
-        _analyze_crypto(ticker, dry_run, primary_model)
+        _analyze_crypto(ticker, dry_run, primary_model, console, MODELS, MODEL_COLORS)
         return
 
     if not as_json:

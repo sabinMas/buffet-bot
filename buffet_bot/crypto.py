@@ -217,3 +217,150 @@ def _order_id() -> str:
     """Generate a simple unique client order ID."""
     import uuid
     return f"buffet-bot-{uuid.uuid4().hex[:12]}"
+
+
+# ── Analysis helper (moved from main.py per ADR-008) ─────────────────────────
+
+def analyze_crypto(symbol: str, dry_run: bool, primary_model: str,
+                   console, models: list, model_colors: dict) -> None:
+    """Full crypto analysis flow — data fetch, LLM consensus, optional order.
+
+    Accepts console, models, and model_colors from main.py to avoid circular
+    imports (per ADR-008).
+    """
+    import json
+    import click
+    import ollama
+
+    from rich.panel import Panel
+
+    console.print(Panel(
+        f"[bold]{symbol}[/bold]  |  [dim]Crypto asset[/dim]",
+        title="Analyzing Crypto", border_style="yellow"))
+
+    with console.status(f"[bold yellow]Fetching crypto data for {symbol}...[/bold yellow]"):
+        quote = get_crypto_quote(symbol)
+        vol   = get_crypto_volatility(symbol)
+        bars  = get_crypto_bars(symbol, days=30)
+
+    if quote:
+        console.print(Panel(
+            f"Bid: [dim]${quote.get('bid', 0):,.6f}[/dim]  "
+            f"Ask: [dim]${quote.get('ask', 0):,.6f}[/dim]  "
+            f"Mid: [bold]${quote.get('mid', 0):,.6f}[/bold]",
+            title=f"[bold]{symbol}[/bold] Live Quote",
+            border_style="yellow",
+        ))
+    else:
+        console.print(f"[dim]Live quote unavailable for {symbol}[/dim]")
+
+    if vol:
+        return_color = "green" if vol.get("return_30d", 0) >= 0 else "red"
+        console.print(Panel(
+            f"30-day Return:       [{return_color}]{vol.get('return_30d', 0):+.1f}%[/{return_color}]\n"
+            f"Annualised Vol:      [yellow]{vol.get('vol_30d_annualized', 0):.1f}%[/yellow]\n"
+            f"Daily Std Dev:       {vol.get('daily_std', 0):.2f}%\n"
+            f"Max Drawdown (30d):  [red]{vol.get('max_drawdown', 0):.1f}%[/red]",
+            title="Volatility Metrics",
+            border_style="dim",
+        ))
+
+    price_context = ""
+    if not bars.empty and "close" in bars.columns:
+        last5 = bars["close"].tail(5).round(6).tolist()
+        price_context = f"Last 5 closes: {last5}"
+
+    prompt = f"""
+Crypto Trading AI — {symbol}
+Asset Type: Cryptocurrency
+{f"Mid Price: ${quote.get('mid', 0):,.6f}" if quote else ""}
+{f"30-day Return: {vol.get('return_30d', 0):+.1f}%" if vol else ""}
+{f"Annualised Volatility: {vol.get('vol_30d_annualized', 0):.1f}%" if vol else ""}
+{f"Max Drawdown (30d): {vol.get('max_drawdown', 0):.1f}%" if vol else ""}
+{price_context}
+
+Rules:
+- Crypto is highly volatile; size positions at max 2% of portfolio per trade
+- Use momentum + volatility context to inform action
+- Stop-loss at 8-15% for crypto (wider than equities)
+
+JSON only: {{"action": "BUY|SELL|HOLD", "confidence": 0.75, "usd_amount": 200, "reason": "2 sentences", "stop_pct": 0.10}}
+"""
+
+    secondary = models[1] if len(models) > 1 else None
+    models_to_query = [primary_model]
+    if secondary and primary_model != secondary:
+        models_to_query.append(secondary)
+
+    responses = {}
+    for model in models_to_query:
+        try:
+            resp = ollama.chat(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                options={"temperature": 0.2},
+            )
+            content = resp["message"]["content"].strip()
+            start, end = content.find("{"), content.rfind("}") + 1
+            if start >= 0 and end > start:
+                responses[model] = json.loads(content[start:end])
+            else:
+                responses[model] = {"error": "No JSON", "raw": content[:200]}
+        except json.JSONDecodeError:
+            responses[model] = {"error": "Invalid JSON"}
+        except Exception as e:
+            responses[model] = {"error": str(e)}
+
+    # Inline _print_ai_responses
+    for model, resp in responses.items():
+        color = model_colors.get(model, "white")
+        content = json.dumps(resp, indent=2) if isinstance(resp, dict) else str(resp)
+        console.print(Panel(content,
+                            title=f"[bold {color}]{model}[/bold {color}]",
+                            border_style=color))
+
+    actions = [r.get("action", "HOLD") for r in responses.values()
+               if isinstance(r, dict) and "action" in r]
+    consensus = max(set(actions), key=actions.count) if actions else "HOLD"
+    # Inline _consensus_text
+    c_color = {"BUY": "green", "SELL": "red", "HOLD": "yellow"}.get(consensus, "white")
+    console.print(f"\nConsensus: [bold {c_color}]{consensus}[/bold {c_color}]")
+
+    if not dry_run and consensus == "BUY":
+        best = max(
+            (r for r in responses.values() if isinstance(r, dict) and r.get("action") == "BUY"),
+            key=lambda x: x.get("confidence", 0),
+            default=None,
+        )
+        if best is None:
+            console.print("[yellow]No valid BUY signal.[/yellow]")
+            return
+
+        usd_amount = float(best.get("usd_amount", 100))
+        cb_key = os.getenv("COINBASE_API_KEY")
+        broker = "Coinbase (live)" if cb_key else "Alpaca paper"
+        if click.confirm(f"Execute BUY ${usd_amount:.2f} of {symbol} via {broker}?"):
+            if cb_key:
+                try:
+                    result = coinbase_market_buy(symbol, usd_amount)
+                    console.print(f"[bold green]Coinbase order submitted:[/bold green] {result}")
+                except Exception as e:
+                    console.print(f"[red]Coinbase order error: {e}[/red]")
+            else:
+                try:
+                    from alpaca.trading.client import TradingClient as _TC
+                    from alpaca.trading.requests import MarketOrderRequest as _MOR
+                    from alpaca.trading.enums import OrderSide as _OS, TimeInForce as _TIF
+                    _client = _TC(os.getenv("ALPACA_API_KEY"), os.getenv("ALPACA_SECRET_KEY"),
+                                  paper=True)
+                    alpaca_sym = symbol.replace("/", "")
+                    order = _MOR(
+                        symbol=alpaca_sym,
+                        notional=round(usd_amount, 2),
+                        side=_OS.BUY,
+                        time_in_force=_TIF.GTC,
+                    )
+                    result = _client.submit_order(order)
+                    console.print(f"[bold green]Alpaca paper crypto order: {result.id}[/bold green]")
+                except Exception as e:
+                    console.print(f"[red]Alpaca order error: {e}[/red]")
