@@ -1,8 +1,28 @@
 # Buffet-Bot Roadmap
 
 > Managed by: Product Manager Agent
-> Last updated: 2026-02-28
-> Current version: v0.4.0
+> Last updated: 2026-03-01
+> Current version: v0.4.1
+
+---
+
+## Session Handoff Log
+
+### 2026-03-01 — Engineer (session 6)
+**Role taken:** Engineer (v0.5.0)
+**What was done this session:**
+- Fixed `pyproject.toml` version: `0.2.0` → `0.4.1` (was stale since v0.2.0)
+- Committed all untracked files: `buffet_bot/automate.py`, `buffet_bot/insiders.py`, `buffet_bot/universe.py`, `tests/` (4 test files)
+- Marked `alerts check` as complete in ROADMAP (was already implemented in main.py at line 3594)
+**Next agent should pick up:** Any open v0.5.0 item. Suggested targets:
+- `[PERF]` Concurrent FRED + Nasdaq HTTP in `_run_analysis()` — quick win, reduces wall time
+- `[ENG]` Beta-adjusted position sizing — augments `_calculate_position_size()` in analyze/buy
+- `[ENG]` Portfolio VaR — additive to `portfolio` command output
+- `[QA]` Run `pytest tests/` and verify all tests pass before v0.5.0 is declared ready
+**Known issues / notes:**
+- `tests/` are staged but have not been run in CI — QA agent should verify pass rate
+- `pyproject.toml` had `[project.optional-dependencies]` added in a prior session but version not bumped — now fixed
+- `alerts check` was implemented but ROADMAP showed `[ ]` — now corrected
 
 ---
 
@@ -40,10 +60,10 @@
 
 ---
 
-## v0.4.1 — Data Expansion + UX Polish (Next Up)
+## v0.4.1 — Data Expansion + UX Polish ✅ SHIPPED
 
 ### Intelligence
-- [ ] [SCRAPER+ENG] SEC EDGAR Form 4 insider transaction fetcher + `insiders` command
+- [x] [SCRAPER+ENG] SEC EDGAR Form 4 insider transaction fetcher + `insiders` command — complete 2026-03-01
 - [x] [ENG] FRED macro indicators injected into LLM prompt — TICKET-001 complete 2026-03-01
 - [x] [ENG] Earnings calendar integration — TICKET-002 complete 2026-03-01
 - [x] [ENG] Options chain basic display — put/call ratio, unusual volume flag
@@ -60,7 +80,7 @@
 - [x] [STYLE] Add data source + timestamp footer to `analyze` output
 - [x] [ENG] `--json` flag on `analyze` and `scan` for scripting output
 - [x] [ENG] Shell autocomplete via Click 8 built-in completion — `completion` command added 2026-03-01
-- [~] [STYLE] `dashboard` command — column alignment, color thresholds, visual polish
+- [x] [STYLE] `dashboard` command — column alignment, color thresholds, visual polish — complete 2026-03-01
 
 ### Architecture
 - [x] [ARCH] Structural audit of main.py — `agents/AUDIT.md` written; split candidates documented; SCHEMA.md + PATTERNS.md updated
@@ -68,14 +88,20 @@
 - [x] [ENG] Remove dead `asyncio` import (line 3, main.py) — flagged in AUDIT.md D-001
 - [x] [ENG] Migrate `_analyze_crypto()` from `main.py` to `crypto.py` — ADR-008 implemented; main.py -131 lines
 
+### Discovery
+- [x] [ENG] `buffet_bot/universe.py` — bundled 366-company DB across 11 GICS sectors; `list_companies()`, `search_companies()`, `search_edgar()` — complete 2026-03-01
+- [x] [ENG] `browse` command — sector overview, sector filter (`--sector`), keyword search, full EDGAR 10K+ (`--all`) — complete 2026-03-01
+- [x] [ENG] `_COMMON_TICKERS` expanded from 45 → 366 tickers sourced from `_COMPANY_DB` — tab-completion covers all sectors — complete 2026-03-01
+
 ---
 
 ## v0.5.0 — Automation + Advanced Signals
 
 ### Automation
+- [x] [ENG] `automate` command — ReAct agent loop: LLM chains scan/analyze/buy tools autonomously to fulfill a natural-language goal; dry-run by default, `--execute` flag for paper trades, `--budget` cap, `--max-steps` limit — complete 2026-03-01
 - [ ] [ENG] Cron-compatible `scan --notify` mode: output parseable for scripts/email
 - [ ] [ENG] `run-plan` scheduler: execute saved plans on a schedule
-- [ ] [ENG] `alerts check` command: evaluate all set alerts and report
+- [x] [ENG] `alerts check` command: evaluate all set alerts and report — complete 2026-03-01
 
 ### Signals
 - [ ] [SCRAPER+ENG] Analyst consensus ratings (Nasdaq API or similar)
@@ -102,7 +128,11 @@
 - [ ] [ENG] Model performance tracking: log LLM recommendation outcomes in DB
 
 ### Architecture
-- [ ] [ARCH+ENG+QA] Full test suite with `pytest` — mock Alpaca and yfinance responses
+- [x] [ARCH+ENG+QA] Full test suite with `pytest` — mock Alpaca and yfinance responses
+  - [x] [QA] Phase 1: Pure logic tests (72 tests) — `tests/test_analysis.py` complete 2026-03-01
+  - [x] [QA] Phase 2: DB layer tests — `tests/test_db.py` complete 2026-03-01
+  - [x] [QA] Phase 3: Data fetching with mocks — `tests/test_data_fetching.py` complete 2026-03-01
+  - [x] [QA] Phase 4: CLI commands via CliRunner — `tests/test_cli.py` complete 2026-03-01
 - [ ] [ARCH] DB migration system: versioned schema changes
 
 ### Security

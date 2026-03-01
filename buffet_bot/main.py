@@ -34,6 +34,14 @@ from buffet_bot.crypto import (
 )
 from buffet_bot.volatile import scan_volatile, display_volatile_table, VOLATILE_UNIVERSE
 from buffet_bot.ibkr import get_ibkr_status, ibkr_market_order
+from buffet_bot.insiders import (
+    fetch_insider_transactions, insider_summary,
+    insider_prompt_block, display_insider_table,
+)
+from buffet_bot.universe import (
+    list_companies, search_companies, search_edgar, SECTORS,
+)
+from buffet_bot.automate import run_agent_loop
 
 from rich.console import Console
 from rich.panel import Panel
@@ -550,13 +558,13 @@ def analyze_news_sentiment(news_items, ticker, primary_model):
 
 from click.shell_completion import CompletionItem
 
-_COMMON_TICKERS = [
-    'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'TSLA', 'BRK.B', 'JPM',
-    'V',    'MA',   'UNH',   'JNJ',  'WMT',  'PG',   'XOM',  'HD',    'CVX',
-    'MRK',  'LLY',  'ABBV',  'PEP',  'KO',   'AVGO', 'COST', 'MCD',   'NFLX',
-    'AMD',  'INTC', 'CRM',   'ORCL', 'QCOM', 'TXN',  'NOW',  'SHOP',  'SQ',
-    'BTC/USD', 'ETH/USD', 'SOL/USD', 'DOGE/USD', 'ADA/USD',
-]
+# All tickers from the bundled universe DB (~500) + crypto pairs for tab completion.
+# universe.py is the single source of truth for stock tickers.
+from buffet_bot.universe import _COMPANY_DB as _UNIVERSE_DB  # internal — kept here for perf
+_COMMON_TICKERS = (
+    list(_UNIVERSE_DB.keys())
+    + ['BTC/USD', 'ETH/USD', 'SOL/USD', 'DOGE/USD', 'ADA/USD']
+)
 
 def _complete_ticker(ctx, param, incomplete):
     """Return watchlist tickers + common tickers for shell tab completion."""
@@ -636,12 +644,19 @@ def _run_analysis(ticker, risk, primary_model, strategy='value'):
             f"CPI index {macro.get('cpi', 'N/A')}."
         )
 
+    insiders_block = ""
+    try:
+        insider_txns = fetch_insider_transactions(ticker, days=60, limit=5, max_filings=5)
+        insiders_block = insider_prompt_block(insider_txns)
+    except Exception:
+        pass
+
     strategy_guidance = STRATEGY_PROMPTS.get(strategy, STRATEGY_PROMPTS['value'])
 
     prompt = f"""
     Buffett Trading AI for {ticker} | Risk: {risk} | Strategy: {strategy.upper()}
     Buffett Score: {buffett['score']}/100 | ROE: {buffett.get('roe','?')}% | ROIC: {buffett.get('roic','?')}% | Debt/Eq: {buffett.get('debt_eq','?')} | OpMargin: {buffett.get('op_margin','?')}% | FCF Yield: {buffett.get('fcf_yield','?')}% | P/E: {buffett.get('pe','?')} | P/B: {buffett.get('pb','?')}
-    {live_block}{news_block}{macro_block}
+    {live_block}{news_block}{macro_block}{insiders_block}
     Recent Prices (30d): {hist.to_dict()}
     Tech {'(RSI: ' + str(tech.get('rsi', 'N/A')) + ', MACD: ' + str(tech.get('macd', 'N/A')) + ')' if tech else ''}
 
@@ -742,6 +757,13 @@ def _score_color(score):
     if score >= yellow_thresh:
         return 'yellow'
     return 'red'
+
+def _change_color(chg):
+    """4-tier color for a price change percentage value."""
+    if chg >= 2.0:   return 'bold bright_green'
+    if chg >= 0:     return 'green'
+    if chg >= -2.0:  return 'red'
+    return 'bold bright_red'
 
 def _print_live_market(ticker, realtime, news):
     """Print a live market data panel and recent news table."""
@@ -1463,6 +1485,151 @@ def lookup(query):
     console.print("\n[dim]Tip: Run 'buffet-bot analyze <SYMBOL>' to analyze any ticker above.[/dim]")
 
 @cli.command()
+@click.argument('query', required=False, default=None,
+                metavar='[QUERY]')
+@click.option('--sector', default=None,
+              type=click.Choice(SECTORS, case_sensitive=False),
+              help='Filter by sector (e.g. Technology, Healthcare).')
+@click.option('--limit', default=50, show_default=True, type=int,
+              help='Max companies to display.')
+@click.option('--all', 'full_universe', is_flag=True, default=False,
+              help='Search the full SEC EDGAR universe (10,000+ companies, requires network).')
+def browse(query, sector, limit, full_universe):
+    """Browse or search the investable universe: buffet-bot browse --sector Technology
+
+    \b
+    Examples:
+      buffet-bot browse                        # sector overview
+      buffet-bot browse --sector Healthcare    # list healthcare companies
+      buffet-bot browse "electric vehicle"     # search by keyword (bundled DB)
+      buffet-bot browse "bank" --all           # search full EDGAR universe (10K+)
+    """
+    _TIP = "\n[dim]Tip: run [bold]buffet-bot analyze TICKER[/bold] or [bold]buffet-bot lookup TICKER[/bold] for detail.[/dim]"
+
+    # ── Full EDGAR universe search ─────────────────────────────────────────
+    if full_universe:
+        if not query:
+            console.print("[yellow]Provide a search term with --all, e.g.: buffet-bot browse apple --all[/yellow]")
+            return
+        console.print(Panel(
+            f"Searching SEC EDGAR for [bold]{query}[/bold] across [bold cyan]10,000+[/bold cyan] companies...",
+            title="[bold]SEC EDGAR Universe Search[/bold]",
+            border_style="blue",
+        ))
+        with console.status("[dim]Fetching EDGAR company list...[/dim]", spinner="dots"):
+            try:
+                results = search_edgar(query, limit=limit)
+            except Exception as e:
+                console.print(f"[red]EDGAR search failed: {e}[/red]")
+                return
+        if not results:
+            console.print(f"[yellow]No EDGAR results for '{query}'.[/yellow]")
+            return
+        tbl = Table(
+            title=f"EDGAR Results for '{query}' ({len(results)} shown)",
+            box=box.ROUNDED, header_style="bold blue",
+        )
+        tbl.add_column("Ticker",  style="bold cyan", min_width=8,  no_wrap=True)
+        tbl.add_column("Company Name",               min_width=35)
+        tbl.add_column("CIK",     style="dim",       min_width=10, no_wrap=True)
+        for r in results:
+            tbl.add_row(r["ticker"], r["name"].title(), r["cik"])
+        console.print(tbl)
+        console.print(f"[dim]Source: SEC EDGAR company_tickers.json — {len(results)} match(es)[/dim]")
+        console.print(_TIP)
+        return
+
+    # ── Keyword search in bundled DB ───────────────────────────────────────
+    if query and not sector:
+        results = search_companies(query, limit=limit)
+        if not results:
+            # yfinance fallback
+            console.print(f"[dim]No bundled results for '{query}' — trying yfinance search...[/dim]")
+            try:
+                yf_results = yf.Search(query).quotes
+                if not yf_results:
+                    console.print(f"[yellow]No results found for '{query}'. Try --all for the full EDGAR universe.[/yellow]")
+                    return
+                tbl = Table(
+                    title=f"Search results: '{query}'",
+                    box=box.ROUNDED, header_style="bold blue",
+                )
+                tbl.add_column("Ticker",       style="bold cyan", min_width=8)
+                tbl.add_column("Company Name",                    min_width=30)
+                tbl.add_column("Exchange",     style="dim",       min_width=10)
+                tbl.add_column("Type",         style="dim",       min_width=10)
+                for q in yf_results[:limit]:
+                    tbl.add_row(
+                        q.get("symbol", ""),
+                        q.get("longname") or q.get("shortname", ""),
+                        q.get("exchange", ""),
+                        q.get("quoteType", ""),
+                    )
+                console.print(tbl)
+                console.print(_TIP)
+                return
+            except Exception as e:
+                console.print(f"[yellow]Search unavailable: {e}. Try --all for the full EDGAR universe.[/yellow]")
+                return
+        tbl = Table(
+            title=f"Search results: '{query}'  ({len(results)} match(es))",
+            box=box.ROUNDED, header_style="bold blue",
+        )
+        tbl.add_column("Ticker",   style="bold cyan", min_width=8,  no_wrap=True)
+        tbl.add_column("Company",                     min_width=35)
+        tbl.add_column("Sector",   style="dim",       min_width=22)
+        tbl.add_column("Exchange", style="dim",       min_width=8)
+        for r in results:
+            tbl.add_row(r["ticker"], r["name"], r["sector"], r["exchange"])
+        console.print(tbl)
+        console.print(_TIP)
+        return
+
+    # ── Sector listing ─────────────────────────────────────────────────────
+    if sector:
+        companies = list_companies(sector=sector, limit=limit)
+        tbl = Table(
+            title=f"[bold]{sector}[/bold] — {len(companies)} companies",
+            box=box.ROUNDED, header_style="bold blue",
+        )
+        tbl.add_column("#",        style="dim",       justify="right", min_width=4)
+        tbl.add_column("Ticker",   style="bold cyan", min_width=8,  no_wrap=True)
+        tbl.add_column("Company",                     min_width=38)
+        tbl.add_column("Exchange", style="dim",       min_width=8)
+        for i, c in enumerate(companies, 1):
+            tbl.add_row(str(i), c["ticker"], c["name"], c["exchange"])
+        console.print(tbl)
+        console.print(_TIP)
+        return
+
+    # ── Sector overview (no args) ──────────────────────────────────────────
+    from buffet_bot.universe import _COMPANY_DB as _DB
+    sector_counts: dict[str, int] = {}
+    for v in _DB.values():
+        sector_counts[v["sector"]] = sector_counts.get(v["sector"], 0) + 1
+
+    tbl = Table(
+        title=f"[bold]Investable Universe[/bold]  —  {len(_DB)} companies across {len(SECTORS)} sectors",
+        box=box.ROUNDED, header_style="bold blue",
+    )
+    tbl.add_column("Sector",          min_width=28)
+    tbl.add_column("Companies",       justify="right", min_width=11)
+    tbl.add_column("Sample Tickers",  style="dim",     min_width=35)
+
+    for s in SECTORS:
+        count   = sector_counts.get(s, 0)
+        samples = [t for t, v in _DB.items() if v["sector"] == s][:5]
+        tbl.add_row(f"[bold]{s}[/bold]", str(count), ", ".join(samples))
+
+    console.print(tbl)
+    console.print(
+        "\n[dim]Filter by sector:  [bold]buffet-bot browse --sector Technology[/bold]\n"
+        "Search by keyword:  [bold]buffet-bot browse \"electric vehicle\"[/bold]\n"
+        "Full universe:      [bold]buffet-bot browse \"bank\" --all[/bold]  "
+        f"(10,000+ companies via SEC EDGAR)[/dim]"
+    )
+
+@cli.command()
 @click.argument('ticker', shell_complete=_complete_ticker)
 @click.option('--risk', type=click.Choice(['low', 'medium', 'high']), default=None,
               help='Risk tolerance [default: from config or medium].')
@@ -2033,6 +2200,258 @@ def plans(run_plan, delete_plan, primary_model):
     console.print(table)
     console.print("\n[dim]Run a plan:    buffet-bot plans --run <name>[/dim]")
     console.print("[dim]Delete a plan: buffet-bot plans --delete <name>[/dim]")
+
+
+# ── Automate ──────────────────────────────────────────────────────────────────
+
+def _build_automate_tools(execute: bool, budget: float, primary_model: str, risk: str = 'medium', strategy: str = 'value') -> dict:
+    """
+    Return the tool registry for the automate agent loop.
+
+    Each entry: {tool_name: {"description": str, "params": str, "fn": callable}}
+    Budget is enforced via a mutable-list closure so spend accumulates across calls.
+    """
+    spent = [0.0]  # mutable closure for budget tracking
+
+    DEFAULT_SCAN_TICKERS = [
+        'AAPL', 'MSFT', 'GOOGL', 'BRK-B', 'JNJ', 'V', 'JPM', 'PG',
+        'KO', 'WMT', 'ABBV', 'MRK', 'LLY', 'TMO', 'UNH', 'HD', 'AMZN', 'NVDA', 'META', 'TSLA',
+    ]
+
+    def scan_stocks(top=5):
+        tickers = DEFAULT_SCAN_TICKERS
+        results = {}
+        with ThreadPoolExecutor(max_workers=min(len(tickers), 8)) as pool:
+            futures = {pool.submit(get_buffett_metrics, t): t for t in tickers}
+            for fut in as_completed(futures):
+                t = futures[fut]
+                try:
+                    results[t] = fut.result()
+                except Exception:
+                    results[t] = {'score': 0}
+        ranked = sorted(results.items(), key=lambda x: x[1].get('score', 0), reverse=True)
+        return [{'ticker': t, 'score': m.get('score', 0)} for t, m in ranked[:int(top)]]
+
+    def analyze_stock(ticker, risk=risk, strategy=strategy):
+        ticker = ticker.upper()
+        data = _run_analysis(ticker, risk, primary_model, strategy)
+        realtime = data.get('realtime') or {}
+        buffett  = data.get('buffett')  or {}
+        best     = data.get('best_buy_resp') or {}
+        return {
+            'ticker':        ticker,
+            'consensus':     data.get('consensus', 'HOLD'),
+            'buffett_score': buffett.get('score', 0),
+            'price':         realtime.get('price', 0),
+            'reason':        best.get('reason', ''),
+            'suggested_qty': best.get('qty', 0),
+        }
+
+    def get_portfolio():
+        try:
+            positions = trading_client.get_all_positions()
+            return [
+                {
+                    'ticker':        p.symbol,
+                    'qty':           p.qty,
+                    'market_value':  float(p.market_value),
+                    'unrealized_pl': float(p.unrealized_pl),
+                }
+                for p in positions
+            ]
+        except Exception as e:
+            return {'error': str(e)}
+
+    def get_account_status():
+        try:
+            acct = trading_client.get_account()
+            return {
+                'cash':          float(acct.cash),
+                'buying_power':  float(acct.buying_power),
+            }
+        except Exception as e:
+            return {'error': str(e)}
+
+    def check_sell_candidates():
+        try:
+            positions = trading_client.get_all_positions()
+            if not positions:
+                return []
+            tuples = _check_sell_signals(positions)
+            return [
+                {'ticker': pos.symbol, 'signals': sigs}
+                for pos, sigs, _score, _rsi in tuples
+                if sigs
+            ]
+        except Exception as e:
+            return {'error': str(e)}
+
+    def search_companies_tool(query):
+        try:
+            return list(search_companies(query, limit=10))
+        except Exception as e:
+            return {'error': str(e)}
+
+    def browse_sector(sector):
+        try:
+            return list(list_companies(sector=sector, limit=20))
+        except Exception as e:
+            return {'error': str(e)}
+
+    def buy_stock(ticker, qty):
+        if not execute:
+            return {'executed': False, 'reason': 'dry-run mode — pass --execute to place orders'}
+        ticker = ticker.upper()
+        qty    = int(qty)
+        price  = (get_realtime_data(ticker) or {}).get('price', 0) or 0
+        cost   = price * qty
+        if spent[0] + cost > budget:
+            return {
+                'executed': False,
+                'reason':   f'exceeds budget (${spent[0]:.2f} spent of ${budget:.2f})',
+            }
+        _place_order(ticker, {'qty': qty})
+        spent[0] += cost
+        return {
+            'executed':       True,
+            'ticker':         ticker,
+            'qty':            qty,
+            'estimated_cost': round(cost, 2),
+            'total_spent':    round(spent[0], 2),
+        }
+
+    return {
+        'scan_stocks': {
+            'description': 'Scan default watchlist for Buffett-scored opportunities',
+            'params':      'top=5',
+            'fn':          scan_stocks,
+        },
+        'analyze_stock': {
+            'description': 'Run full LLM analysis on a single ticker',
+            'params':      'ticker, risk="medium", strategy="value"',
+            'fn':          analyze_stock,
+        },
+        'get_portfolio': {
+            'description': 'List current Alpaca paper portfolio positions',
+            'params':      '',
+            'fn':          get_portfolio,
+        },
+        'get_account_status': {
+            'description': 'Get paper account cash and buying power',
+            'params':      '',
+            'fn':          get_account_status,
+        },
+        'check_sell_candidates': {
+            'description': 'Check all positions for sell signals (stop/underperform/overbought)',
+            'params':      '',
+            'fn':          check_sell_candidates,
+        },
+        'search_companies': {
+            'description': 'Search the company database by keyword or name',
+            'params':      'query',
+            'fn':          search_companies_tool,
+        },
+        'browse_sector': {
+            'description': 'List companies in a sector (e.g. "Technology", "Healthcare")',
+            'params':      'sector',
+            'fn':          browse_sector,
+        },
+        'buy_stock': {
+            'description': 'Place a paper market BUY order (respects --execute and --budget)',
+            'params':      'ticker, qty',
+            'fn':          buy_stock,
+        },
+    }
+
+
+@cli.command()
+@click.argument('goal', required=False, default=None)
+@click.option('--execute', 'execute', is_flag=True, default=False,
+              help='Allow paper trades. Default is dry-run.')
+@click.option('--budget', default=500.0, show_default=True, type=float,
+              help='Max capital to spend this session (paper $).')
+@click.option('--max-steps', default=10, show_default=True, type=int,
+              help='Max agent steps before stopping.')
+@click.option('--model', 'primary_model', default=MODELS[0], show_default=True,
+              type=click.Choice(MODELS),
+              help='LLM to use as the agent brain.')
+@click.option('--risk', default=None, type=click.Choice(['low', 'medium', 'high']),
+              help='Risk appetite (low/medium/high). Prompted if omitted in wizard mode.')
+@click.option('--strategy', default=None,
+              type=click.Choice(['value', 'growth', 'dividend', 'turnaround']),
+              help='Investing strategy. Prompted if omitted in wizard mode.')
+def automate(goal, execute, budget, max_steps, primary_model, risk, strategy):
+    """AI agent that autonomously chains buffet-bot tools to accomplish a goal.
+
+    \b
+    Examples:
+      buffet-bot automate
+      buffet-bot automate "find the top 3 value stocks"
+      buffet-bot automate "invest $500 in the best stock" --execute --budget 500 --risk high
+      buffet-bot automate "should I sell anything?" --max-steps 5
+    """
+    from rich.prompt import Prompt
+
+    if not goal:
+        console.print(Panel(
+            "Let's set up your automated investing session.",
+            title="[bold cyan]Buffet-Bot Automate[/bold cyan]",
+            border_style="cyan",
+        ))
+        budget_str = Prompt.ask("How much do you want to invest?", default=f"{budget:.2f}")
+        try:
+            budget = float(budget_str.replace('$', '').replace(',', ''))
+        except ValueError:
+            console.print("[red]Invalid amount.[/red]")
+            return
+        if not risk:
+            risk = Prompt.ask("Risk level", choices=['low', 'medium', 'high'], default='medium')
+        if not strategy:
+            strategy = Prompt.ask("Strategy", choices=['value', 'growth', 'dividend', 'turnaround'], default='value')
+        if not execute:
+            execute = click.confirm("Execute real paper trades?", default=False)
+        goal = (
+            f"Invest ${budget:.2f} using a {risk}-risk {strategy} strategy. "
+            f"Scan for top candidates, analyze them, and buy the best opportunities."
+        )
+    else:
+        if not risk:
+            risk = 'medium'
+        if not strategy:
+            strategy = 'value'
+
+    tools = _build_automate_tools(execute=execute, budget=budget, primary_model=primary_model,
+                                   risk=risk, strategy=strategy)
+
+    console.print(Panel(
+        f"[bold]Goal:[/bold] {goal}\n"
+        f"[bold]Budget:[/bold] ${budget:,.2f}  "
+        f"[bold]Risk:[/bold] {risk}  "
+        f"[bold]Strategy:[/bold] {strategy}  "
+        f"[bold]Mode:[/bold] {'[green]EXECUTE[/green]' if execute else '[yellow]DRY RUN[/yellow]'}  "
+        f"[bold]Max steps:[/bold] {max_steps}  "
+        f"[bold]Model:[/bold] {primary_model}",
+        title="[bold cyan]Buffet-Bot Automate[/bold cyan]",
+        border_style="cyan",
+    ))
+
+    import ollama as _ollama
+    result = run_agent_loop(
+        goal=goal,
+        tools=tools,
+        model=primary_model,
+        budget=budget,
+        max_steps=max_steps,
+        execute=execute,
+        console=console,
+        ollama_module=_ollama,
+        risk=risk,
+        strategy=strategy,
+    )
+    if result.get('timed_out'):
+        console.print(
+            f"[yellow]Agent stopped after {max_steps} steps without calling done().[/yellow]"
+        )
 
 
 @cli.command()
@@ -2692,52 +3111,68 @@ def chart(ticker, period, save_path):
 
 @cli.command()
 @click.argument('tickers', nargs=-1)
-def dashboard(tickers):
+@click.option('--interval', default=60, show_default=True, type=int,
+              help='Refresh interval in seconds.')
+def dashboard(tickers, interval):
     """Live multi-ticker price dashboard: buffet-bot dashboard AAPL MSFT GOOGL TSLA"""
     if not tickers:
         tickers = ('AAPL', 'MSFT', 'GOOGL', 'TSLA')
     tickers = tuple(t.upper() for t in tickers)
 
     console.print(Panel(
-        f"Watching: [bold]{', '.join(tickers)}[/bold]\n"
-        "[dim]Press Ctrl+C to exit[/dim]",
+        f"Watching [bold cyan]{len(tickers)}[/bold cyan] ticker(s): "
+        f"[bold]{', '.join(tickers)}[/bold]\n"
+        f"[dim]Refreshing every {interval}s — Ctrl+C to exit[/dim]",
+        title="[bold]Live Dashboard[/bold]",
         border_style="blue"))
 
     try:
         while True:
-            rows = {t: get_realtime_data(t) for t in tickers}
+            with console.status("[dim]Fetching prices...[/dim]", spinner="dots"):
+                rows = {t: get_realtime_data(t) for t in tickers}
             console.clear()
 
-            tbl = Table(title="Live Dashboard", box=box.ROUNDED, header_style="bold blue")
-            tbl.add_column("Ticker",  style="bold cyan")
-            tbl.add_column("Price",   justify="right")
-            tbl.add_column("Change%", justify="right")
-            tbl.add_column("High",    justify="right")
-            tbl.add_column("Low",     justify="right")
-            tbl.add_column("Volume",  justify="right")
-            tbl.add_column("Updated", style="dim")
+            now_str  = datetime.now().strftime('%H:%M:%S')
+            next_str = (datetime.now() + timedelta(seconds=interval)).strftime('%H:%M:%S')
 
-            now_str = datetime.now().strftime('%H:%M:%S')
+            tbl = Table(
+                title=f"[bold]Live Dashboard[/bold]  [dim]{now_str}[/dim]",
+                box=box.ROUNDED, header_style="bold blue",
+            )
+            tbl.add_column("Ticker",  style="bold cyan",  min_width=8,  no_wrap=True)
+            tbl.add_column("Price",   justify="right",    min_width=10)
+            tbl.add_column("Change%", justify="right",    min_width=10)
+            tbl.add_column("Open",    justify="right",    min_width=10)
+            tbl.add_column("High",    justify="right",    min_width=10)
+            tbl.add_column("Low",     justify="right",    min_width=10)
+            tbl.add_column("Volume",  justify="right",    min_width=13)
+            tbl.add_column("Source",  style="dim",        min_width=9,  no_wrap=True)
+
             for t in tickers:
-                d     = rows.get(t) or {}
-                chg   = d.get('change_pct', 0)
-                color = "green" if chg >= 0 else "red"
-                sign  = '+' if chg >= 0 else ''
+                d   = rows.get(t) or {}
+                chg = d.get('change_pct', 0.0)
+                sign = '+' if chg >= 0 else ''
+                clr  = _change_color(chg)
                 tbl.add_row(
                     t,
-                    f"${d['price']:.2f}"        if 'price'      in d else "—",
-                    f"[{color}]{sign}{chg:.2f}%[/{color}]" if 'change_pct' in d else "—",
-                    f"${d['high']:.2f}"          if 'high'       in d else "—",
-                    f"${d['low']:.2f}"           if 'low'        in d else "—",
-                    f"{d['volume']:,}"           if 'volume'     in d else "—",
-                    now_str,
+                    f"${d['price']:.2f}"                       if 'price'      in d else "—",
+                    f"[{clr}]{sign}{chg:.2f}%[/{clr}]"         if 'change_pct' in d else "—",
+                    f"${d['open']:.2f}"                        if 'open'       in d else "—",
+                    f"${d['high']:.2f}"                        if 'high'       in d else "—",
+                    f"${d['low']:.2f}"                         if 'low'        in d else "—",
+                    f"{d['volume']:,}"                         if 'volume'     in d else "—",
+                    d.get('source', '—'),
                 )
 
             console.print(tbl)
-            console.print(Panel(
-                "[dim]Refreshing every 60s — Ctrl+C to exit[/dim]",
-                border_style="dim"))
-            time.sleep(60)
+            console.print(
+                f"[dim]  ■ ≥+2%  [bold bright_green]bright green[/bold bright_green]"
+                f"  ■ 0–+2%  [green]green[/green]"
+                f"  ■ 0–−2%  [red]red[/red]"
+                f"  ■ <−2%  [bold bright_red]bright red[/bold bright_red]"
+                f"    Next refresh: {next_str}[/dim]"
+            )
+            time.sleep(interval)
     except KeyboardInterrupt:
         console.print("\n[dim]Dashboard stopped.[/dim]")
 
@@ -2831,6 +3266,29 @@ def news(ticker, days, primary_model):
                 ))
             except Exception as e:
                 console.print(f"[dim]AI summary unavailable: {e}[/dim]")
+
+
+@cli.command()
+@click.argument('ticker', shell_complete=_complete_ticker)
+@click.option('--days',  default=90, show_default=True, type=int,
+              help='Look-back window for Form 4 filings (days).')
+@click.option('--limit', default=15, show_default=True, type=int,
+              help='Max transactions to display.')
+def insiders(ticker, days, limit):
+    """SEC Form 4 insider trades for a stock: buffet-bot insiders AAPL"""
+    ticker = ticker.upper()
+    console.print(Panel(
+        f"[bold]{ticker}[/bold]  |  Window: [cyan]{days}d[/cyan]  |  "
+        f"Max rows: [cyan]{limit}[/cyan]",
+        title="SEC EDGAR Form 4 — Insider Transactions",
+        border_style="blue",
+    ))
+    with console.status(
+        f"[dim]Fetching SEC EDGAR Form 4 filings for {ticker}...[/dim]",
+        spinner="dots",
+    ):
+        txns = fetch_insider_transactions(ticker, days=days, limit=limit)
+    display_insider_table(ticker, txns, console)
 
 
 @cli.command()
