@@ -51,7 +51,7 @@
 ### Portfolio
 - [ ] [ENG] `rebalance` command — compare actual allocation vs target, suggest trades
 - [x] [ENG] Watchlist management — `watchlist add TSLA`, `watchlist remove TSLA`, `watchlist show`
-- [ ] [ENG] `alerts` command — set price/RSI thresholds, check on next run
+- [x] [ENG] `alerts` command — set price/RSI thresholds, check on next run
 
 ### UX
 - [ ] [STYLE] Rich progress spinners on all LLM queries (no more blank wait)
@@ -63,9 +63,9 @@
 
 ### Architecture
 - [x] [ARCH] Structural audit of main.py — `agents/AUDIT.md` written; split candidates documented; SCHEMA.md + PATTERNS.md updated
-- [~] [ARCH] Config file design: `~/.buffet-bot-config.toml` — ADR-009 accepted; pending PM approval before ENG implements
+- [~] [ENG] Config file: `~/.buffet-bot-config.toml` — ADR-009 approved by PM 2026-02-28; ENG to implement
 - [x] [ENG] Remove dead `asyncio` import (line 3, main.py) — flagged in AUDIT.md D-001
-- [ ] [ARCH+ENG] Migrate `_analyze_crypto()` from `main.py` to `crypto.py` — ADR-008 proposed, pending PM approval
+- [~] [ARCH+ENG] Migrate `_analyze_crypto()` from `main.py` to `crypto.py` — ADR-008 approved by PM 2026-02-28
 
 ---
 

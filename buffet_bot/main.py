@@ -127,6 +127,15 @@ def init_db():
             ticker   TEXT PRIMARY KEY,
             added_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS alerts (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker     TEXT    NOT NULL,
+            type       TEXT    NOT NULL,
+            threshold  REAL    NOT NULL,
+            note       TEXT    NOT NULL DEFAULT '',
+            created_at TEXT    NOT NULL,
+            triggered  INTEGER NOT NULL DEFAULT 0
+        );
     """)
     conn.commit()
     conn.close()
@@ -205,6 +214,57 @@ def get_watchlist():
         return [{'ticker': r[0], 'added_at': r[1][:10]} for r in rows]
     except Exception:
         return []
+
+def create_alert(ticker, alert_type, threshold, note=''):
+    """Insert an alert row. Returns the new row id, or None on error."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.execute(
+            "INSERT INTO alerts (ticker, type, threshold, note, created_at) VALUES (?,?,?,?,?)",
+            (ticker.upper(), alert_type, float(threshold), note,
+             datetime.now(timezone.utc).isoformat()),
+        )
+        row_id = cur.lastrowid
+        conn.commit()
+        conn.close()
+        return row_id
+    except Exception:
+        return None
+
+def get_alerts(triggered=False):
+    """Return list of alert dicts. triggered=False returns only active alerts."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        rows = conn.execute(
+            "SELECT id, ticker, type, threshold, note, created_at, triggered "
+            "FROM alerts WHERE triggered = ? ORDER BY ticker, type",
+            (1 if triggered else 0,),
+        ).fetchall()
+        conn.close()
+        cols = ['id', 'ticker', 'type', 'threshold', 'note', 'created_at', 'triggered']
+        return [dict(zip(cols, r)) for r in rows]
+    except Exception:
+        return []
+
+def delete_alert(alert_id):
+    """Delete an alert by id."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("DELETE FROM alerts WHERE id = ?", (int(alert_id),))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+def mark_alert_triggered(alert_id):
+    """Mark an alert as triggered (won't appear in future checks)."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("UPDATE alerts SET triggered = 1 WHERE id = ?", (int(alert_id),))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
 
 init_db()
 
@@ -2798,6 +2858,149 @@ def volatile(n, universe):
     console.print(
         "[dim]Score weights: Beta 30 | Mkt Cap <$2B 25 | Short% 25 | 30d Vol 20[/dim]"
     )
+
+
+@cli.group()
+def alerts():
+    """Set and check price/RSI threshold alerts."""
+    pass
+
+@alerts.command('set')
+@click.argument('ticker')
+@click.option('--price-above', type=float, default=None, help='Trigger when price rises above this value.')
+@click.option('--price-below', type=float, default=None, help='Trigger when price falls below this value.')
+@click.option('--rsi-above',   type=float, default=None, help='Trigger when RSI rises above this value.')
+@click.option('--rsi-below',   type=float, default=None, help='Trigger when RSI falls below this value.')
+@click.option('--note', default='', help='Optional label for this alert.')
+def alerts_set(ticker, price_above, price_below, rsi_above, rsi_below, note):
+    """Set a price or RSI alert: buffet-bot alerts set AAPL --price-above 200"""
+    ticker = ticker.upper()
+    conditions = {
+        'price_above': price_above,
+        'price_below': price_below,
+        'rsi_above':   rsi_above,
+        'rsi_below':   rsi_below,
+    }
+    created = [(t, v) for t, v in conditions.items() if v is not None]
+    if not created:
+        console.print("[red]Specify at least one condition: --price-above, --price-below, --rsi-above, --rsi-below[/red]")
+        return
+    for alert_type, threshold in created:
+        row_id = create_alert(ticker, alert_type, threshold, note)
+        label = alert_type.replace('_', ' ')
+        console.print(f"[green]Alert #{row_id} set:[/green] {ticker} {label} {threshold}"
+                      + (f"  [dim]{note}[/dim]" if note else ""))
+
+@alerts.command('list')
+def alerts_list():
+    """Show all active alerts: buffet-bot alerts list"""
+    items = get_alerts(triggered=False)
+    if not items:
+        console.print("[yellow]No active alerts. Set one with: buffet-bot alerts set AAPL --price-above 200[/yellow]")
+        return
+    table = Table(title="Active Alerts", box=box.ROUNDED, header_style="bold cyan")
+    table.add_column("ID",        justify="right", style="dim")
+    table.add_column("Ticker",    style="bold", no_wrap=True)
+    table.add_column("Condition")
+    table.add_column("Threshold", justify="right")
+    table.add_column("Note",      style="dim")
+    table.add_column("Set",       style="dim")
+    for a in items:
+        table.add_row(
+            str(a['id']),
+            a['ticker'],
+            a['type'].replace('_', ' '),
+            str(a['threshold']),
+            a['note'],
+            a['created_at'][:10],
+        )
+    console.print(table)
+
+@alerts.command('remove')
+@click.argument('alert_id', type=int)
+def alerts_remove(alert_id):
+    """Remove an alert by ID: buffet-bot alerts remove 3"""
+    delete_alert(alert_id)
+    console.print(f"[yellow]Alert #{alert_id} removed.[/yellow]")
+
+@alerts.command('check')
+def alerts_check():
+    """Check all active alerts against current market data: buffet-bot alerts check"""
+    items = get_alerts(triggered=False)
+    if not items:
+        console.print("[yellow]No active alerts to check.[/yellow]")
+        return
+
+    # Gather unique tickers and which data types we need per ticker
+    tickers_needing_rsi = {a['ticker'] for a in items if 'rsi' in a['type']}
+    unique_tickers = {a['ticker'] for a in items}
+
+    prices = {}
+    rsi_values = {}
+    with console.status("[bold blue]Fetching market data...[/bold blue]"):
+        for ticker in unique_tickers:
+            live = get_realtime_data(ticker)
+            prices[ticker] = live.get('price')
+            if ticker in tickers_needing_rsi:
+                tech = get_tech_indicators(ticker)
+                rsi_values[ticker] = tech.get('rsi')
+
+    triggered_ids = []
+    table = Table(title="Alert Check", box=box.ROUNDED, header_style="bold cyan")
+    table.add_column("ID",        justify="right", style="dim")
+    table.add_column("Ticker",    style="bold", no_wrap=True)
+    table.add_column("Condition")
+    table.add_column("Threshold", justify="right")
+    table.add_column("Current",   justify="right")
+    table.add_column("Status")
+
+    for a in items:
+        ticker    = a['ticker']
+        threshold = a['threshold']
+        atype     = a['type']
+
+        if 'price' in atype:
+            current = prices.get(ticker)
+            label   = f"${current:.2f}" if current is not None else "—"
+        else:
+            current = rsi_values.get(ticker)
+            label   = f"{current:.1f}" if current is not None else "—"
+
+        fired = False
+        if current is not None:
+            if atype == 'price_above' and current > threshold:
+                fired = True
+            elif atype == 'price_below' and current < threshold:
+                fired = True
+            elif atype == 'rsi_above' and current > threshold:
+                fired = True
+            elif atype == 'rsi_below' and current < threshold:
+                fired = True
+
+        if fired:
+            triggered_ids.append(a['id'])
+            status_cell = "[bold green]TRIGGERED[/bold green]"
+        else:
+            status_cell = "[dim]waiting[/dim]"
+
+        table.add_row(
+            str(a['id']),
+            ticker,
+            atype.replace('_', ' '),
+            str(threshold),
+            label,
+            status_cell,
+        )
+
+    console.print(table)
+
+    if triggered_ids:
+        console.print(f"\n[bold green]{len(triggered_ids)} alert(s) triggered.[/bold green]")
+        for aid in triggered_ids:
+            mark_alert_triggered(aid)
+        console.print("[dim]Triggered alerts removed from active list.[/dim]")
+    else:
+        console.print("[dim]No alerts triggered.[/dim]")
 
 
 @cli.group()
