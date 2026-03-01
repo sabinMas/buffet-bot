@@ -61,8 +61,9 @@ MODEL_COLORS = {
     'qwen2.5:7b': 'magenta',
 }
 
-PLANS_DIR = os.path.expanduser("~/.buffet-plans")
-DB_PATH = os.path.expanduser("~/.buffet-bot.db")
+PLANS_DIR   = os.path.expanduser("~/.buffet-plans")
+DB_PATH     = os.path.expanduser("~/.buffet-bot.db")
+CONFIG_PATH = os.path.expanduser("~/.buffet-bot-config.toml")
 
 STRATEGY_PROMPTS = {
     'value': (
@@ -94,6 +95,40 @@ GOAL_PRESETS = {
     'etf':      ['SPY', 'QQQ', 'VTI', 'SCHD', 'AGG'],
     'buffett':  ['BRK-B', 'KO', 'AAPL', 'JNJ', 'V'],
 }
+
+# ── Config ────────────────────────────────────────────────────────────────────
+
+try:
+    import tomllib
+except ImportError:
+    tomllib = None  # Python < 3.11 — config reads silently disabled
+
+try:
+    import tomli_w
+except ImportError:
+    tomli_w = None
+
+_CONFIG_DEFAULTS = {
+    'defaults': {'model': MODELS[0], 'risk': 'medium', 'strategy': 'value'},
+    'display':  {'buffett_score_green': 70, 'buffett_score_yellow': 40},
+}
+
+def _load_config():
+    """Load ~/.buffet-bot-config.toml, merging with hardcoded defaults."""
+    cfg = {s: dict(v) for s, v in _CONFIG_DEFAULTS.items()}
+    if tomllib is None or not os.path.exists(CONFIG_PATH):
+        return cfg
+    try:
+        with open(CONFIG_PATH, 'rb') as f:
+            user = tomllib.load(f)
+        for section, values in user.items():
+            if section in cfg and isinstance(values, dict):
+                cfg[section].update(values)
+    except Exception:
+        pass
+    return cfg
+
+_CONFIG = _load_config()
 
 # ── Database ──────────────────────────────────────────────────────────────────
 
@@ -1452,16 +1487,22 @@ def lookup(query):
 
 @cli.command()
 @click.argument('ticker')
-@click.option('--risk', type=click.Choice(['low', 'medium', 'high']), default='medium')
+@click.option('--risk', type=click.Choice(['low', 'medium', 'high']), default=None,
+              help='Risk tolerance [default: from config or medium].')
 @click.option('--dry-run/--execute', default=True)
-@click.option('--model', 'primary_model', default='deepseek-r1', type=click.Choice(MODELS))
+@click.option('--model', 'primary_model', default=None, type=click.Choice(MODELS),
+              help='Primary Ollama model [default: from config or deepseek-r1].')
 @click.option('--strategy', type=click.Choice(['value', 'growth', 'dividend', 'turnaround']),
-              default='value', show_default=True, help='Investment strategy lens.')
+              default=None, help='Investment strategy lens [default: from config or value].')
 @click.option('--json', 'as_json', is_flag=True, default=False,
               help='Output result as JSON (suppresses Rich output).')
 def analyze(ticker, risk, dry_run, primary_model, strategy, as_json):
     """Analyze stock or crypto: buffet-bot analyze AAPL / buffet-bot analyze BTC/USD"""
     ticker = ticker.upper()
+    cfg = _CONFIG['defaults']
+    if primary_model is None: primary_model = cfg.get('model', MODELS[0])
+    if risk is None:          risk          = cfg.get('risk', 'medium')
+    if strategy is None:      strategy      = cfg.get('strategy', 'value')
 
     # ── Crypto routing ────────────────────────────────────────────────────────
     if is_crypto_symbol(ticker):
@@ -1532,12 +1573,18 @@ def analyze(ticker, risk, dry_run, primary_model, strategy, as_json):
 
 @cli.command()
 @click.argument('ticker')
-@click.option('--risk', type=click.Choice(['low', 'medium', 'high']), default='medium')
-@click.option('--model', 'primary_model', default='deepseek-r1', type=click.Choice(MODELS))
+@click.option('--risk', type=click.Choice(['low', 'medium', 'high']), default=None,
+              help='Risk tolerance [default: from config or medium].')
+@click.option('--model', 'primary_model', default=None, type=click.Choice(MODELS),
+              help='Primary Ollama model [default: from config or deepseek-r1].')
 @click.option('--strategy', type=click.Choice(['value', 'growth', 'dividend', 'turnaround']),
-              default='value', show_default=True, help='Investment strategy lens.')
+              default=None, help='Investment strategy lens [default: from config or value].')
 def buy(ticker, risk, primary_model, strategy):
     """Analyze then immediately prompt to buy: buffet-bot buy AAPL --strategy dividend"""
+    cfg = _CONFIG['defaults']
+    if primary_model is None: primary_model = cfg.get('model', MODELS[0])
+    if risk is None:          risk          = cfg.get('risk', 'medium')
+    if strategy is None:      strategy      = cfg.get('strategy', 'value')
     console.print(Panel(
         f"[bold]{ticker}[/bold]  |  Risk: [yellow]{risk}[/yellow]  |  Strategy: [cyan]{strategy}[/cyan]",
         title="Analyzing", border_style="blue"))
@@ -2858,6 +2905,46 @@ def volatile(n, universe):
     console.print(
         "[dim]Score weights: Beta 30 | Mkt Cap <$2B 25 | Short% 25 | 30d Vol 20[/dim]"
     )
+
+
+@cli.group()
+def config():
+    """View or edit ~/.buffet-bot-config.toml."""
+    pass
+
+@config.command('show')
+def config_show():
+    """Show effective config (file values merged with defaults): buffet-bot config show"""
+    file_exists = os.path.exists(CONFIG_PATH)
+    source = f"[dim](from {CONFIG_PATH})[/dim]" if file_exists else "[dim](defaults only — no config file)[/dim]"
+    cfg = _load_config()
+
+    table = Table(title=f"Effective Config  {source}", box=box.ROUNDED, header_style="bold cyan")
+    table.add_column("Section", style="bold", no_wrap=True)
+    table.add_column("Key", style="bold")
+    table.add_column("Value")
+    for section, values in cfg.items():
+        for key, val in values.items():
+            table.add_row(section, key, str(val))
+    console.print(table)
+    if not file_exists:
+        console.print(f"[dim]Create a config file with: buffet-bot config init[/dim]")
+
+@config.command('init')
+@click.option('--force', is_flag=True, default=False, help='Overwrite existing config file.')
+def config_init(force):
+    """Write a default config file at ~/.buffet-bot-config.toml: buffet-bot config init"""
+    if tomli_w is None:
+        console.print("[red]tomli-w not installed. Run: pip install tomli-w[/red]")
+        return
+    if os.path.exists(CONFIG_PATH) and not force:
+        console.print(f"[yellow]Config file already exists: {CONFIG_PATH}[/yellow]")
+        console.print("[dim]Use --force to overwrite.[/dim]")
+        return
+    with open(CONFIG_PATH, 'wb') as f:
+        tomli_w.dump(_CONFIG_DEFAULTS, f)
+    console.print(f"[green]Config written: {CONFIG_PATH}[/green]")
+    console.print("[dim]Edit it with any text editor, then re-run your commands.[/dim]")
 
 
 @cli.group()
