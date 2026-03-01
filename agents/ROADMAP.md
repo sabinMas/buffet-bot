@@ -60,6 +60,7 @@
 - [x] [STYLE] Add data source + timestamp footer to `analyze` output
 - [x] [ENG] `--json` flag on `analyze` and `scan` for scripting output
 - [ ] [ENG] Shell autocomplete via `click-completion` or `argcomplete`
+- [~] [STYLE] `dashboard` command — column alignment, color thresholds, visual polish
 
 ### Architecture
 - [x] [ARCH] Structural audit of main.py — `agents/AUDIT.md` written; split candidates documented; SCHEMA.md + PATTERNS.md updated
