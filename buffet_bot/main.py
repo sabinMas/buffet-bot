@@ -546,6 +546,27 @@ def analyze_news_sentiment(news_items, ticker, primary_model):
     except Exception:
         return _neutral
 
+# ── Shell completion ─────────────────────────────────────────────────────────
+
+from click.shell_completion import CompletionItem
+
+_COMMON_TICKERS = [
+    'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'TSLA', 'BRK.B', 'JPM',
+    'V',    'MA',   'UNH',   'JNJ',  'WMT',  'PG',   'XOM',  'HD',    'CVX',
+    'MRK',  'LLY',  'ABBV',  'PEP',  'KO',   'AVGO', 'COST', 'MCD',   'NFLX',
+    'AMD',  'INTC', 'CRM',   'ORCL', 'QCOM', 'TXN',  'NOW',  'SHOP',  'SQ',
+    'BTC/USD', 'ETH/USD', 'SOL/USD', 'DOGE/USD', 'ADA/USD',
+]
+
+def _complete_ticker(ctx, param, incomplete):
+    """Return watchlist tickers + common tickers for shell tab completion."""
+    try:
+        watchlist = [row['ticker'] for row in get_watchlist()]
+    except Exception:
+        watchlist = []
+    candidates = list(dict.fromkeys(watchlist + _COMMON_TICKERS))
+    return [CompletionItem(t) for t in candidates if t.upper().startswith(incomplete.upper())]
+
 # ── LLM helpers ──────────────────────────────────────────────────────────────
 
 def _query_llms_freeform(prompt_text, primary_model):
@@ -1442,7 +1463,7 @@ def lookup(query):
     console.print("\n[dim]Tip: Run 'buffet-bot analyze <SYMBOL>' to analyze any ticker above.[/dim]")
 
 @cli.command()
-@click.argument('ticker')
+@click.argument('ticker', shell_complete=_complete_ticker)
 @click.option('--risk', type=click.Choice(['low', 'medium', 'high']), default=None,
               help='Risk tolerance [default: from config or medium].')
 @click.option('--dry-run/--execute', default=True)
@@ -1543,7 +1564,7 @@ def analyze(ticker, risk, dry_run, primary_model, strategy, as_json):
                 console.print("[yellow]No valid BUY signal[/yellow]")
 
 @cli.command()
-@click.argument('ticker')
+@click.argument('ticker', shell_complete=_complete_ticker)
 @click.option('--risk', type=click.Choice(['low', 'medium', 'high']), default=None,
               help='Risk tolerance [default: from config or medium].')
 @click.option('--model', 'primary_model', default=None, type=click.Choice(MODELS),
@@ -2344,7 +2365,7 @@ def milestones(balance, monthly, annual_return):
 
 
 @cli.command()
-@click.argument('ticker')
+@click.argument('ticker', shell_complete=_complete_ticker)
 @click.option('--period',  default=1.0,     show_default=True, type=float, help='Period in years.')
 @click.option('--capital', default=10000.0, show_default=True, type=float, help='Starting capital ($).')
 @click.option('--compare/--no-compare', default=True, show_default=True,
@@ -2558,7 +2579,7 @@ def check_sells(execute):
 
 
 @cli.command()
-@click.argument('ticker')
+@click.argument('ticker', shell_complete=_complete_ticker)
 @click.option('--interval', default='1m', type=click.Choice(['1m', '5m', '15m']),
               show_default=True, help='Refresh interval.')
 def stream(ticker, interval):
@@ -2610,7 +2631,7 @@ def stream(ticker, interval):
 
 
 @cli.command()
-@click.argument('ticker')
+@click.argument('ticker', shell_complete=_complete_ticker)
 @click.option('--period', default='1mo', type=click.Choice(['1d', '5d', '1mo']),
               show_default=True, help='Chart period.')
 @click.option('--save', 'save_path', default=None, metavar='PATH',
@@ -2724,7 +2745,7 @@ def dashboard(tickers):
 # ── New v0.4.0 commands ───────────────────────────────────────────────────────
 
 @cli.command()
-@click.argument('ticker')
+@click.argument('ticker', shell_complete=_complete_ticker)
 @click.option('--days', default=90, show_default=True, type=int,
               help='Look-back window for congressional trades (days).')
 @click.option('--model', 'primary_model', default='deepseek-r1', type=click.Choice(MODELS))
@@ -3055,7 +3076,7 @@ def alerts():
     pass
 
 @alerts.command('set')
-@click.argument('ticker')
+@click.argument('ticker', shell_complete=_complete_ticker)
 @click.option('--price-above', type=float, default=None, help='Trigger when price rises above this value.')
 @click.option('--price-below', type=float, default=None, help='Trigger when price falls below this value.')
 @click.option('--rsi-above',   type=float, default=None, help='Trigger when RSI rises above this value.')
@@ -3198,7 +3219,7 @@ def watchlist():
     pass
 
 @watchlist.command('add')
-@click.argument('ticker')
+@click.argument('ticker', shell_complete=_complete_ticker)
 def watchlist_add(ticker):
     """Add a ticker to your watchlist: buffet-bot watchlist add TSLA"""
     ticker = ticker.upper()
@@ -3206,7 +3227,7 @@ def watchlist_add(ticker):
     console.print(f"[green]Added [bold]{ticker}[/bold] to watchlist.[/green]")
 
 @watchlist.command('remove')
-@click.argument('ticker')
+@click.argument('ticker', shell_complete=_complete_ticker)
 def watchlist_remove(ticker):
     """Remove a ticker from your watchlist: buffet-bot watchlist remove TSLA"""
     ticker = ticker.upper()
@@ -3230,7 +3251,7 @@ def watchlist_show():
 
 
 @cli.command()
-@click.argument('ticker')
+@click.argument('ticker', shell_complete=_complete_ticker)
 @click.option('--expiry', default=None,
               help='Expiration date (YYYY-MM-DD). Defaults to nearest available.')
 @click.option('--top', default=5, show_default=True, type=int,
@@ -3338,6 +3359,31 @@ def options(ticker, expiry, top):
         else "Neutral sentiment"
     )
     console.print(f"[dim]{pc_interp}  |  {len(expirations)} expiries available[/dim]")
+
+
+@cli.command()
+@click.argument('shell', type=click.Choice(['bash', 'zsh', 'fish']), default='bash')
+def completion(shell):
+    """Print shell tab-completion setup: buffet-bot completion bash|zsh|fish"""
+    prog = 'buffet-bot'
+    env_var = '_BUFFET_BOT_COMPLETE'
+    if shell == 'bash':
+        line = f'eval "$({env_var}=bash_source {prog})"'
+        dest = '~/.bashrc'
+    elif shell == 'zsh':
+        line = f'eval "$({env_var}=zsh_source {prog})"'
+        dest = '~/.zshrc'
+    else:
+        line = f'{env_var}=fish_source {prog} | source'
+        dest = '~/.config/fish/completions/buffet-bot.fish'
+    console.print(Panel(
+        f"Add this line to [cyan]{dest}[/cyan] then restart your shell:\n\n"
+        f"  [bold green]{line}[/bold green]\n\n"
+        f"[dim]Completes commands, --risk/--model/--strategy options, and TICKER "
+        f"arguments (your watchlist + {len(_COMMON_TICKERS)} common stocks).[/dim]",
+        title="[bold]Shell Completion Setup[/bold]",
+        border_style="cyan",
+    ))
 
 
 def main():

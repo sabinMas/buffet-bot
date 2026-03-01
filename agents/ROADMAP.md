@@ -59,7 +59,7 @@
 - [x] [STYLE] `scan` output: sort by score, color-coded rows, compact layout
 - [x] [STYLE] Add data source + timestamp footer to `analyze` output
 - [x] [ENG] `--json` flag on `analyze` and `scan` for scripting output
-- [ ] [ENG] Shell autocomplete via `click-completion` or `argcomplete`
+- [x] [ENG] Shell autocomplete via Click 8 built-in completion — `completion` command added 2026-03-01
 - [~] [STYLE] `dashboard` command — column alignment, color thresholds, visual polish
 
 ### Architecture
