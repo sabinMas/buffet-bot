@@ -129,8 +129,8 @@
 
 ## ADR-009: Config file format — TOML at `~/.buffet-bot-config.toml`
 - **Date:** 2026-02-28
-- **Status:** Accepted (pending PM approval to implement)
-- **Decided by:** Architect Agent
+- **Status:** Accepted — PM approved implementation 2026-02-28
+- **Decided by:** Architect Agent → PM approved
 
 **Context:** ROADMAP v0.4.1 lists `~/.buffet-bot-config.toml` for user preferences. The open question in this file listed `.toml` vs `.json` vs more env vars.
 
@@ -167,8 +167,8 @@ buffett_score_yellow = 40    # Score >= this → yellow (else red)
 
 ## ADR-008: `_analyze_crypto` migration to `crypto.py`
 - **Date:** 2026-02-28
-- **Status:** Proposed (pending PM approval)
-- **Decided by:** Architect Agent
+- **Status:** Accepted — PM approved implementation 2026-02-28
+- **Decided by:** Architect Agent → PM approved
 
 **Context:** `_analyze_crypto()` (lines 1204–1334, 131 lines) lives in `main.py` but is logically crypto domain logic. All other crypto code lives in `buffet_bot/crypto.py`.
 
