@@ -29,7 +29,7 @@ from buffet_bot.data import (
 )
 from buffet_bot.display import (
     _print_ai_responses, _consensus_text, _score_color,
-    _change_color, _print_live_market,
+    _change_color, _print_live_market, _make_panel_title,
 )
 from buffet_bot.analysis import _run_analysis, _place_order, _query_llms_freeform
 from buffet_bot.risk import _calculate_position_size
@@ -62,12 +62,16 @@ Answer the following question thoughtfully and concisely, referencing relevant f
 
 Question: {question}"""
 
-    console.print(Panel(question, title="[bold]Question[/bold]", border_style="blue"))
+    console.print(Panel(question, title=_make_panel_title("Question", "bright_cyan"), border_style="bright_cyan", box=box.ROUNDED))
     responses = _query_llms_freeform(prompt, primary_model)
     for model_name, response_text in responses.items():
-        color = MODEL_COLORS.get(model_name, 'white')
-        console.print(Panel(response_text, title=f"[bold {color}]{model_name}[/bold {color}]",
-                            border_style=color))
+        color = MODEL_COLORS.get(model_name, 'bright_cyan')
+        if color == 'cyan':
+            color = 'bright_cyan'
+        elif color == 'magenta':
+            color = 'bright_magenta'
+        console.print(Panel(response_text, title=_make_panel_title(model_name, color),
+                            border_style=color, box=box.ROUNDED))
 
 
 @click.command()
@@ -77,18 +81,18 @@ def lookup(query):
     try:
         results = yf.Search(query).quotes
     except Exception as e:
-        console.print(f"[red]Search error: {e}[/red]")
+        console.print(f"[bright_red]Search error: {e}[/bright_red]")
         return
 
     if not results:
-        console.print(f"[yellow]No results found for '{query}'.[/yellow]")
+        console.print(f"[bright_yellow]No results found for '{query}'.[/bright_yellow]")
         return
 
-    table = Table(title=f"Search results for: {query}", box=box.ROUNDED, header_style="bold blue")
-    table.add_column("Symbol", style="bold cyan")
-    table.add_column("Company Name")
-    table.add_column("Exchange", style="dim")
-    table.add_column("Type", style="dim")
+    table = Table(title=f"Search results for: {query}", box=box.ROUNDED, header_style="bold bright_cyan")
+    table.add_column("Symbol", style="bold bright_cyan")
+    table.add_column("Company Name", style="bright_white")
+    table.add_column("Exchange", style="dim bright_white")
+    table.add_column("Type", style="dim bright_white")
 
     for q in results:
         table.add_row(
@@ -99,7 +103,7 @@ def lookup(query):
         )
 
     console.print(table)
-    console.print("\n[dim]Tip: Run 'buffet-bot analyze <SYMBOL>' to analyze any ticker above.[/dim]")
+    console.print("\n[dim bright_cyan]Tip: Run [bold]buffet-bot analyze <SYMBOL>[/bold] to analyze any ticker above.[/dim bright_cyan]")
 
 
 @click.command()
@@ -121,37 +125,37 @@ def browse(query, sector, limit, full_universe):
     from buffet_bot.universe import (
         list_companies, search_companies, search_edgar, SECTORS, _COMPANY_DB as _DB,
     )
-    _TIP = "\n[dim]Tip: run [bold]buffet-bot analyze TICKER[/bold] or [bold]buffet-bot lookup TICKER[/bold] for detail.[/dim]"
+    _TIP = "\n[dim bright_cyan]Tip: run [bold]buffet-bot analyze TICKER[/bold] or [bold]buffet-bot lookup TICKER[/bold] for detail.[/dim bright_cyan]"
 
     if full_universe:
         if not query:
-            console.print("[yellow]Provide a search term with --all, e.g.: buffet-bot browse apple --all[/yellow]")
+            console.print("[bright_yellow]Provide a search term with --all, e.g.: buffet-bot browse apple --all[/bright_yellow]")
             return
         console.print(Panel(
-            f"Searching SEC EDGAR for [bold]{query}[/bold] across [bold cyan]10,000+[/bold cyan] companies...",
-            title="[bold]SEC EDGAR Universe Search[/bold]",
-            border_style="blue",
+            f"Searching SEC EDGAR for [bold bright_white]{query}[/bold bright_white] across [bold bright_cyan]10,000+[/bold bright_cyan] companies...",
+            title=_make_panel_title("SEC EDGAR Universe Search", "bright_cyan"),
+            border_style="bright_cyan", box=box.ROUNDED,
         ))
         with console.status("[dim]Fetching EDGAR company list...[/dim]", spinner="dots"):
             try:
                 results = search_edgar(query, limit=limit)
             except Exception as e:
-                console.print(f"[red]EDGAR search failed: {e}[/red]")
+                console.print(f"[bright_red]EDGAR search failed: {e}[/bright_red]")
                 return
         if not results:
-            console.print(f"[yellow]No EDGAR results for '{query}'.[/yellow]")
+            console.print(f"[bright_yellow]No EDGAR results for '{query}'.[/bright_yellow]")
             return
         tbl = Table(
             title=f"EDGAR Results for '{query}' ({len(results)} shown)",
-            box=box.ROUNDED, header_style="bold blue",
+            box=box.ROUNDED, header_style="bold bright_cyan",
         )
-        tbl.add_column("Ticker",  style="bold cyan", min_width=8,  no_wrap=True)
-        tbl.add_column("Company Name",               min_width=35)
-        tbl.add_column("CIK",     style="dim",       min_width=10, no_wrap=True)
+        tbl.add_column("Ticker",  style="bold bright_cyan", min_width=8,  no_wrap=True)
+        tbl.add_column("Company Name", style="bright_white",               min_width=35)
+        tbl.add_column("CIK",     style="dim bright_white",       min_width=10, no_wrap=True)
         for r in results:
             tbl.add_row(r["ticker"], r["name"].title(), r["cik"])
         console.print(tbl)
-        console.print(f"[dim]Source: SEC EDGAR company_tickers.json — {len(results)} match(es)[/dim]")
+        console.print(f"[dim bright_cyan]Source: SEC EDGAR company_tickers.json — {len(results)} match(es)[/dim bright_cyan]")
         console.print(_TIP)
         return
 
@@ -162,16 +166,16 @@ def browse(query, sector, limit, full_universe):
             try:
                 yf_results = yf.Search(query).quotes
                 if not yf_results:
-                    console.print(f"[yellow]No results found for '{query}'. Try --all for the full EDGAR universe.[/yellow]")
+                    console.print(f"[bright_yellow]No results found for '{query}'. Try --all for the full EDGAR universe.[/bright_yellow]")
                     return
                 tbl = Table(
                     title=f"Search results: '{query}'",
-                    box=box.ROUNDED, header_style="bold blue",
+                    box=box.ROUNDED, header_style="bold bright_cyan",
                 )
-                tbl.add_column("Ticker",       style="bold cyan", min_width=8)
-                tbl.add_column("Company Name",                    min_width=30)
-                tbl.add_column("Exchange",     style="dim",       min_width=10)
-                tbl.add_column("Type",         style="dim",       min_width=10)
+                tbl.add_column("Ticker",       style="bold bright_cyan", min_width=8)
+                tbl.add_column("Company Name", style="bright_white",                    min_width=30)
+                tbl.add_column("Exchange",     style="dim bright_white",       min_width=10)
+                tbl.add_column("Type",         style="dim bright_white",       min_width=10)
                 for q in yf_results[:limit]:
                     tbl.add_row(
                         q.get("symbol", ""),
@@ -183,16 +187,16 @@ def browse(query, sector, limit, full_universe):
                 console.print(_TIP)
                 return
             except Exception as e:
-                console.print(f"[yellow]Search unavailable: {e}. Try --all for the full EDGAR universe.[/yellow]")
+                console.print(f"[bright_yellow]Search unavailable: {e}. Try --all for the full EDGAR universe.[/bright_yellow]")
                 return
         tbl = Table(
             title=f"Search results: '{query}'  ({len(results)} match(es))",
-            box=box.ROUNDED, header_style="bold blue",
+            box=box.ROUNDED, header_style="bold bright_cyan",
         )
-        tbl.add_column("Ticker",   style="bold cyan", min_width=8,  no_wrap=True)
-        tbl.add_column("Company",                     min_width=35)
-        tbl.add_column("Sector",   style="dim",       min_width=22)
-        tbl.add_column("Exchange", style="dim",       min_width=8)
+        tbl.add_column("Ticker",   style="bold bright_cyan", min_width=8,  no_wrap=True)
+        tbl.add_column("Company", style="bright_white",                    min_width=35)
+        tbl.add_column("Sector",   style="dim bright_white",       min_width=22)
+        tbl.add_column("Exchange", style="dim bright_white",       min_width=8)
         for r in results:
             tbl.add_row(r["ticker"], r["name"], r["sector"], r["exchange"])
         console.print(tbl)
@@ -202,13 +206,13 @@ def browse(query, sector, limit, full_universe):
     if sector:
         companies = list_companies(sector=sector, limit=limit)
         tbl = Table(
-            title=f"[bold]{sector}[/bold] — {len(companies)} companies",
-            box=box.ROUNDED, header_style="bold blue",
+            title=f"[bold bright_cyan]{sector}[/bold bright_cyan] — {len(companies)} companies",
+            box=box.ROUNDED, header_style="bold bright_cyan",
         )
         tbl.add_column("#",        style="dim",       justify="right", min_width=4)
-        tbl.add_column("Ticker",   style="bold cyan", min_width=8,  no_wrap=True)
-        tbl.add_column("Company",                     min_width=38)
-        tbl.add_column("Exchange", style="dim",       min_width=8)
+        tbl.add_column("Ticker",   style="bold bright_cyan", min_width=8,  no_wrap=True)
+        tbl.add_column("Company", style="bright_white",                    min_width=38)
+        tbl.add_column("Exchange", style="dim bright_white",       min_width=8)
         for i, c in enumerate(companies, 1):
             tbl.add_row(str(i), c["ticker"], c["name"], c["exchange"])
         console.print(tbl)
@@ -220,24 +224,24 @@ def browse(query, sector, limit, full_universe):
         sector_counts[v["sector"]] = sector_counts.get(v["sector"], 0) + 1
 
     tbl = Table(
-        title=f"[bold]Investable Universe[/bold]  —  {len(_DB)} companies across {len(SECTORS)} sectors",
-        box=box.ROUNDED, header_style="bold blue",
+        title=f"[bold bright_cyan]Investable Universe[/bold bright_cyan]  —  {len(_DB)} companies across {len(SECTORS)} sectors",
+        box=box.ROUNDED, header_style="bold bright_cyan",
     )
-    tbl.add_column("Sector",          min_width=28)
-    tbl.add_column("Companies",       justify="right", min_width=11)
-    tbl.add_column("Sample Tickers",  style="dim",     min_width=35)
+    tbl.add_column("Sector", style="bright_white",          min_width=28)
+    tbl.add_column("Companies", style="bright_white",       justify="right", min_width=11)
+    tbl.add_column("Sample Tickers",  style="dim bright_cyan",     min_width=35)
 
     for s in SECTORS:
         count   = sector_counts.get(s, 0)
         samples = [t for t, v in _DB.items() if v["sector"] == s][:5]
-        tbl.add_row(f"[bold]{s}[/bold]", str(count), ", ".join(samples))
+        tbl.add_row(f"[bold bright_cyan]{s}[/bold bright_cyan]", str(count), ", ".join(samples))
 
     console.print(tbl)
     console.print(
-        "\n[dim]Filter by sector:  [bold]buffet-bot browse --sector Technology[/bold]\n"
+        "\n[dim bright_cyan]Filter by sector:  [bold]buffet-bot browse --sector Technology[/bold]\n"
         "Search by keyword:  [bold]buffet-bot browse \"electric vehicle\"[/bold]\n"
         "Full universe:      [bold]buffet-bot browse \"bank\" --all[/bold]  "
-        f"(10,000+ companies via SEC EDGAR)[/dim]"
+        f"(10,000+ companies via SEC EDGAR)[/dim bright_cyan]"
     )
 
 
@@ -266,8 +270,8 @@ def analyze(ticker, risk, dry_run, primary_model, strategy, as_json):
 
     if not as_json:
         console.print(Panel(
-            f"[bold]{ticker}[/bold]  |  Risk: [yellow]{risk}[/yellow]  |  Strategy: [cyan]{strategy}[/cyan]",
-            title="Analyzing", border_style="blue"))
+            f"[bold bright_white]{ticker}[/bold bright_white]  |  Risk: [bright_yellow]{risk}[/bright_yellow]  |  Strategy: [bright_cyan]{strategy}[/bright_cyan]",
+            title=_make_panel_title("Analyzing", "bright_cyan"), border_style="bright_cyan", box=box.ROUNDED))
 
     result = _run_analysis(ticker, risk, primary_model, strategy)
 
@@ -297,19 +301,19 @@ def analyze(ticker, risk, dry_run, primary_model, strategy, as_json):
         days_away = (datetime.strptime(earnings['date'], '%Y-%m-%d') - datetime.utcnow()).days + 1
         timing = earnings['time'].replace('time-', '').replace('-', ' ')
         console.print(Panel(
-            f"[bold yellow]Earnings in {days_away} day(s)[/bold yellow] "
+            f"[bold bright_yellow]Earnings in {days_away} day(s)[/bold bright_yellow] "
             f"({timing}) — {earnings['fiscal_quarter']}  EPS est: {earnings['eps_forecast']}",
-            title="[bold yellow]Upcoming Earnings Warning[/bold yellow]",
-            border_style="yellow",
+            title=_make_panel_title("Upcoming Earnings Warning", "bright_yellow"),
+            border_style="bright_yellow", box=box.ROUNDED,
         ))
     analyst = result.get('analyst', {})
     if analyst:
         upside = analyst.get('upside_pct')
         sign   = '+' if (upside or 0) >= 0 else ''
-        u_color = 'green' if (upside or 0) >= 5 else ('red' if (upside or 0) < 0 else 'yellow')
+        u_color = 'bright_green' if (upside or 0) >= 5 else ('bright_red' if (upside or 0) < 0 else 'bright_yellow')
         rating  = analyst.get('rating_key', 'N/A')
-        r_color = ('green' if rating in ('BUY', 'STRONG BUY') else
-                   'red'   if rating in ('SELL', 'UNDERPERFORM') else 'yellow')
+        r_color = ('bright_green' if rating in ('BUY', 'STRONG BUY') else
+                   'bright_red'   if rating in ('SELL', 'UNDERPERFORM') else 'bright_yellow')
         changes_str = ''
         for ch in analyst.get('recent_changes', [])[:3]:
             changes_str += f"\n  {ch['firm']}: {ch['from'] or '?'} → {ch['to']} ({ch['action']})"
@@ -317,16 +321,16 @@ def analyze(ticker, risk, dry_run, primary_model, strategy, as_json):
             f"Consensus:  [{r_color}][bold]{rating}[/bold][/{r_color}]"
             f"  [dim](mean score {analyst.get('rating_mean', '?')}/5.0, "
             f"{analyst.get('num_analysts', '?')} analysts)[/dim]\n"
-            f"Price target: [bold]${analyst.get('target_mean', 'N/A')}[/bold]  "
+            f"Price target: [bold bright_white]${analyst.get('target_mean', 'N/A')}[/bold bright_white]  "
             f"[dim](low ${analyst.get('target_low', '?')} — high ${analyst.get('target_high', '?')})[/dim]\n"
             f"Implied upside: [{u_color}][bold]{sign}{upside}%[/bold][/{u_color}]"
             + (f"\nRecent changes:{changes_str}" if changes_str else ''),
-            title="[bold]Wall Street Analyst Consensus[/bold]",
-            border_style=r_color,
+            title=_make_panel_title("Wall Street Analyst Consensus", r_color),
+            border_style=r_color, box=box.ROUNDED,
         ))
 
     _print_ai_responses(result['responses'])
-    console.print(f"\nConsensus: {_consensus_text(result['consensus'])}")
+    console.print(f"\n[bright_cyan]CONSENSUS:[/bright_cyan] {_consensus_text(result['consensus'])}")
     data_src = result['realtime'].get('source', 'yfinance')
     console.print(
         f"[dim]Analysis at {datetime.now().strftime('%Y-%m-%d %H:%M')} | "
@@ -343,15 +347,15 @@ def analyze(ticker, risk, dry_run, primary_model, strategy, as_json):
             sizing     = _calculate_position_size(ticker, confidence, cash, beta=beta)
             if sizing:
                 llm_qty    = result['best_buy_resp'].get('qty', 1) if result['best_buy_resp'] else 1
-                beta_note  = f"  |  Beta: [yellow]{sizing['beta']}x[/yellow]" if sizing['beta'] != 1.0 else ""
+                beta_note  = f"  |  Beta: [bright_yellow]{sizing['beta']}x[/bright_yellow]" if sizing['beta'] != 1.0 else ""
                 console.print(Panel(
-                    f"Account cash: [bold]${cash:,.2f}[/bold]\n"
+                    f"Account cash: [bold bright_white]${cash:,.2f}[/bold bright_white]\n"
                     f"LLM suggested qty:   [dim]{llm_qty}[/dim]\n"
-                    f"Formula qty:         [bold cyan]{sizing['qty']}[/bold cyan]  "
+                    f"Formula qty:         [bold bright_green]{sizing['qty']}[/bold bright_green]  "
                     f"(${sizing['dollar_size']:,.2f})\n"
-                    f"ATR: ${sizing['atr']:.2f}  ({sizing['atr_pct']}% of price){beta_note}",
-                    title="[bold cyan]Dynamic Position Sizing[/bold cyan]",
-                    border_style="cyan",
+                    f"ATR: [bright_white]${sizing['atr']:.2f}[/bright_white]  ({sizing['atr_pct']}% of price){beta_note}",
+                    title=_make_panel_title("Dynamic Position Sizing", "bright_green"),
+                    border_style="bright_green", box=box.ROUNDED,
                 ))
         except Exception:
             sizing = None
@@ -382,20 +386,20 @@ def buy(ticker, risk, primary_model, strategy):
     if risk is None:          risk          = cfg.get('risk', 'medium')
     if strategy is None:      strategy      = cfg.get('strategy', 'value')
     console.print(Panel(
-        f"[bold]{ticker}[/bold]  |  Risk: [yellow]{risk}[/yellow]  |  Strategy: [cyan]{strategy}[/cyan]",
-        title="Analyzing", border_style="blue"))
+        f"[bold bright_white]{ticker}[/bold bright_white]  |  Risk: [bright_yellow]{risk}[/bright_yellow]  |  Strategy: [bright_cyan]{strategy}[/bright_cyan]",
+        title=_make_panel_title("Analyzing", "bright_cyan"), border_style="bright_cyan", box=box.ROUNDED))
 
     result = _run_analysis(ticker, risk, primary_model, strategy)
     _print_live_market(ticker, result['realtime'], result['news'])
     _print_ai_responses(result['responses'])
-    console.print(f"\nConsensus: {_consensus_text(result['consensus'])}")
+    console.print(f"\n[bright_cyan]CONSENSUS:[/bright_cyan] {_consensus_text(result['consensus'])}")
 
     if result['consensus'] != 'BUY':
-        console.print(f"[yellow]Consensus is {result['consensus']} — no order placed.[/yellow]")
+        console.print(f"[bright_yellow]Consensus is {result['consensus']} — no order placed.[/bright_yellow]")
         return
 
     if not result['best_buy_resp']:
-        console.print("[yellow]No valid BUY signal from models — no order placed.[/yellow]")
+        console.print("[bright_yellow]No valid BUY signal from models — no order placed.[/bright_yellow]")
         return
 
     sizing = None
@@ -407,15 +411,15 @@ def buy(ticker, risk, primary_model, strategy):
         sizing     = _calculate_position_size(ticker, confidence, cash, beta=beta)
         if sizing:
             llm_qty   = result['best_buy_resp'].get('qty', 1)
-            beta_note = f"  |  Beta: [yellow]{sizing['beta']}x[/yellow]" if sizing['beta'] != 1.0 else ""
+            beta_note = f"  |  Beta: [bright_yellow]{sizing['beta']}x[/bright_yellow]" if sizing['beta'] != 1.0 else ""
             console.print(Panel(
-                f"Account cash: [bold]${cash:,.2f}[/bold]\n"
+                f"Account cash: [bold bright_white]${cash:,.2f}[/bold bright_white]\n"
                 f"LLM suggested qty:   [dim]{llm_qty}[/dim]\n"
-                f"Formula qty:         [bold cyan]{sizing['qty']}[/bold cyan]  "
+                f"Formula qty:         [bold bright_green]{sizing['qty']}[/bold bright_green]  "
                 f"(${sizing['dollar_size']:,.2f})\n"
-                f"ATR: ${sizing['atr']:.2f}  ({sizing['atr_pct']}% of price){beta_note}",
-                title="[bold cyan]Dynamic Position Sizing[/bold cyan]",
-                border_style="cyan",
+                f"ATR: [bright_white]${sizing['atr']:.2f}[/bright_white]  ({sizing['atr_pct']}% of price){beta_note}",
+                title=_make_panel_title("Dynamic Position Sizing", "bright_green"),
+                border_style="bright_green", box=box.ROUNDED,
             ))
     except Exception:
         sizing = None
@@ -550,12 +554,12 @@ def chat(primary_model):
     ] for m in models_in_session}
 
     console.print(Panel(
-        "[bold]Buffett AI Planning Session[/bold]\n\n"
-        f"Models: {', '.join(f'[bold]{m}[/bold]' for m in models_in_session)}\n\n"
+        "[bold bright_cyan]Buffett AI Planning Session[/bold bright_cyan]\n\n"
+        f"Models: {', '.join(f'[bold bright_white]{m}[/bold bright_white]' for m in models_in_session)}\n\n"
         "[dim]Type your question or topic. Both models will respond.\n"
         "Commands:  [bold]exit[/bold] or [bold]quit[/bold] to end  |  "
         "[bold]clear[/bold] to reset conversation history[/dim]",
-        border_style="blue",
+        border_style="bright_cyan", box=box.ROUNDED,
     ))
 
     while True:
@@ -582,7 +586,11 @@ def chat(primary_model):
             histories[m].append({'role': 'user', 'content': user_input})
 
         for model in models_in_session:
-            color = MODEL_COLORS.get(model, 'white')
+            color = MODEL_COLORS.get(model, 'bright_cyan')
+            if color == 'cyan':
+                color = 'bright_cyan'
+            elif color == 'magenta':
+                color = 'bright_magenta'
             try:
                 resp = ollama.chat(
                     model=model,
@@ -592,10 +600,10 @@ def chat(primary_model):
                 reply = resp['message']['content'].strip()
                 histories[model].append({'role': 'assistant', 'content': reply})
                 console.print(Panel(reply,
-                                    title=f"[bold {color}]{model}[/bold {color}]",
-                                    border_style=color))
+                                    title=_make_panel_title(model, color),
+                                    border_style=color, box=box.ROUNDED))
             except Exception as e:
-                console.print(f"[red]{model} error: {e}[/red]")
+                console.print(f"[bright_red]{model} error: {e}[/bright_red]")
                 histories[model].pop()
 
 
@@ -682,16 +690,16 @@ def scan(use_watchlist, top, as_json, as_notify, min_score):
 
     scanned_at = datetime.now().strftime('%Y-%m-%d %H:%M')
     table = Table(
-        title=f"Buffett Scan — {scanned_at}",
-        box=box.ROUNDED, header_style="bold blue",
+        title=f"[bold bright_green]Buffett Scan[/bold bright_green] — {scanned_at}",
+        box=box.ROUNDED, header_style="bold bright_cyan",
     )
-    table.add_column("Rank",  justify="right", style="dim")
-    table.add_column("Ticker", style="bold cyan", no_wrap=True)
-    table.add_column("Score",  justify="right")
-    table.add_column("ROE%",   justify="right")
-    table.add_column("Debt/Eq", justify="right")
-    table.add_column("OpMgn%", justify="right")
-    table.add_column("P/E",    justify="right")
+    table.add_column("Rank",  justify="right", style="dim bright_white")
+    table.add_column("Ticker", style="bold bright_cyan", no_wrap=True)
+    table.add_column("Score",  justify="right", style="bright_white")
+    table.add_column("ROE%",   justify="right", style="bright_white")
+    table.add_column("Debt/Eq", justify="right", style="bright_white")
+    table.add_column("OpMgn%", justify="right", style="bright_white")
+    table.add_column("P/E",    justify="right", style="bright_white")
 
     for rank, (ticker, m) in enumerate(ranked, 1):
         score  = m.get('score', 0)
@@ -703,7 +711,7 @@ def scan(use_watchlist, top, as_json, as_notify, min_score):
         table.add_row(
             str(rank),
             ticker,
-            f"[{color}]{score}[/{color}]",
+            f"[{color}][bold]{score}[/bold][/{color}]",
             f"{roe}" if isinstance(roe, str) else f"{roe:.1f}",
             f"{debt}" if isinstance(debt, str) else f"{debt:.1f}",
             f"{margin}" if isinstance(margin, str) else f"{margin:.1f}",
@@ -711,7 +719,7 @@ def scan(use_watchlist, top, as_json, as_notify, min_score):
         )
 
     console.print(table)
-    console.print(f"[dim]Scanned {len(tickers)} tickers at {scanned_at}[/dim]")
+    console.print(f"[dim bright_cyan]Scanned {len(tickers)} tickers at {scanned_at}[/dim bright_cyan]")
 
 
 @click.command()
@@ -722,10 +730,10 @@ def status():
 
     account = trading_client.get_account()
     console.print(Panel(
-        f"Cash:          [bold green]${float(account.cash):,.2f}[/bold green]\n"
-        f"Buying Power:  [bold cyan]${float(account.buying_power):,.2f}[/bold cyan]",
-        title="[bold]Alpaca Paper Account[/bold]",
-        border_style="blue",
+        f"Cash:          [bold bright_green]${float(account.cash):,.2f}[/bold bright_green]\n"
+        f"Buying Power:  [bold bright_cyan]${float(account.buying_power):,.2f}[/bold bright_cyan]",
+        title=_make_panel_title("Alpaca Paper Account", "bright_green"),
+        border_style="bright_green", box=box.ROUNDED,
     ))
 
     cb_key = os.getenv("COINBASE_API_KEY")
@@ -734,13 +742,13 @@ def status():
             cb = get_coinbase_balance()
         if cb:
             rows = "\n".join(
-                f"  {r['currency']}: [bold]{r['balance']:,.6f}[/bold]"
+                f"  {r['currency']}: [bold bright_white]{r['balance']:,.6f}[/bold bright_white]"
                 for r in cb["accounts"]
             )
             console.print(Panel(
-                f"[bold green]USD Cash: ${cb['total_usd']:,.2f}[/bold green]\n{rows}",
-                title="[bold]Coinbase (Live)[/bold]",
-                border_style="yellow",
+                f"[bold bright_green]USD Cash: ${cb['total_usd']:,.2f}[/bold bright_green]\n{rows}",
+                title=_make_panel_title("Coinbase (Live)", "bright_yellow"),
+                border_style="bright_yellow", box=box.ROUNDED,
             ))
         else:
             console.print("[dim]Coinbase: connected but could not fetch balances.[/dim]")
@@ -753,11 +761,11 @@ def status():
             ibkr = get_ibkr_status()
         if ibkr:
             console.print(Panel(
-                f"Net Liquidation: [bold green]${ibkr.get('NetLiquidation', 0):,.2f}[/bold green]\n"
-                f"Total Cash:      [bold cyan]${ibkr.get('TotalCashValue', 0):,.2f}[/bold cyan]\n"
-                f"Buying Power:    [bold cyan]${ibkr.get('BuyingPower', 0):,.2f}[/bold cyan]",
-                title=f"[bold]IBKR — {ibkr.get('account', ibkr_acct)}[/bold]",
-                border_style="magenta",
+                f"Net Liquidation: [bold bright_green]${ibkr.get('NetLiquidation', 0):,.2f}[/bold bright_green]\n"
+                f"Total Cash:      [bold bright_cyan]${ibkr.get('TotalCashValue', 0):,.2f}[/bold bright_cyan]\n"
+                f"Buying Power:    [bold bright_cyan]${ibkr.get('BuyingPower', 0):,.2f}[/bold bright_cyan]",
+                title=_make_panel_title(f"IBKR — {ibkr.get('account', ibkr_acct)}", "bright_magenta"),
+                border_style="bright_magenta", box=box.ROUNDED,
             ))
         else:
             console.print(

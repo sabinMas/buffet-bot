@@ -16,7 +16,7 @@ from rich import box
 
 from buffet_bot.globals import console, MODELS, trading_client
 from buffet_bot.data import _complete_ticker
-from buffet_bot.display import _score_color
+from buffet_bot.display import _score_color, _make_panel_title
 from buffet_bot.risk import (
     _check_sell_signals, _show_sector_table, _calculate_portfolio_var,
 )
@@ -42,7 +42,7 @@ def rebalance(execute, include_cash):
         return
 
     if not positions:
-        console.print("[yellow]No open positions to rebalance.[/yellow]")
+        console.print("[bright_yellow]No open positions to rebalance.[/bright_yellow]")
         return
 
     cash = float(account.cash)
@@ -50,22 +50,22 @@ def rebalance(execute, include_cash):
     total_value = position_value + cash if include_cash else position_value
 
     if total_value <= 0:
-        console.print("[red]Portfolio value is zero.[/red]")
+        console.print("[bright_red]Portfolio value is zero.[/bright_red]")
         return
 
     n = len(positions)
     target_pct = 1.0 / n
     target_value = total_value * target_pct
 
-    table = Table(title="Rebalance Analysis (Equal Weight)", box=box.ROUNDED,
-                  header_style="bold cyan")
-    table.add_column("Ticker",   style="bold", no_wrap=True)
-    table.add_column("Current $",  justify="right")
-    table.add_column("Current %",  justify="right")
-    table.add_column("Target %",   justify="right")
-    table.add_column("Diff %",     justify="right")
-    table.add_column("Action")
-    table.add_column("Shares",     justify="right")
+    table = Table(title=f"[bold bright_cyan]Rebalance Analysis[/bold bright_cyan] (Equal Weight)", box=box.ROUNDED,
+                  header_style="bold bright_cyan")
+    table.add_column("Ticker",   style="bold bright_cyan", no_wrap=True)
+    table.add_column("Current $",  justify="right", style="bright_white")
+    table.add_column("Current %",  justify="right", style="bright_white")
+    table.add_column("Target %",   justify="right", style="bright_white")
+    table.add_column("Diff %",     justify="right", style="bright_white")
+    table.add_column("Action", style="bright_white")
+    table.add_column("Shares",     justify="right", style="bright_white")
 
     buys = []
     for pos in sorted(positions, key=lambda p: float(p.market_value), reverse=True):
@@ -103,16 +103,16 @@ def rebalance(execute, include_cash):
         )
 
     console.print(Panel(
-        f"Positions: [bold]{n}[/bold]  |  "
-        f"Position value: [bold]${position_value:,.2f}[/bold]  |  "
-        f"Cash: [bold]${cash:,.2f}[/bold]  |  "
-        f"Target per position: [bold]${target_value:,.2f}[/bold] ({target_pct:.1%})",
-        title="Portfolio Summary", border_style="cyan",
+        f"Positions: [bold bright_white]{n}[/bold bright_white]  |  "
+        f"Position value: [bold bright_white]${position_value:,.2f}[/bold bright_white]  |  "
+        f"Cash: [bold bright_white]${cash:,.2f}[/bold bright_white]  |  "
+        f"Target per position: [bold bright_white]${target_value:,.2f}[/bold bright_white] ({target_pct:.1%})",
+        title=_make_panel_title("Portfolio Summary", "bright_cyan"), border_style="bright_cyan", box=box.ROUNDED,
     ))
     console.print(table)
 
     if execute and buys:
-        console.print(f"\n[bold]Placing {len(buys)} buy order(s)...[/bold]")
+        console.print(f"\n[bold bright_cyan]Placing {len(buys)} buy order(s)...[/bold bright_cyan]")
         for symbol, shares, price in buys:
             if click.confirm(f"  BUY {shares}x {symbol} @ ~${price:.2f} (Paper)?", default=False):
                 try:
@@ -121,13 +121,13 @@ def rebalance(execute, include_cash):
                         side=OrderSide.BUY, time_in_force=TimeInForce.DAY,
                     )
                     result = trading_client.submit_order(order)
-                    console.print(f"  [green]Order submitted: {result.id}[/green]")
+                    console.print(f"  [bright_green]Order submitted: {result.id}[/bright_green]")
                 except Exception as e:
-                    console.print(f"  [red]Order error: {e}[/red]")
+                    console.print(f"  [bright_red]Order error: {e}[/bright_red]")
     elif execute:
         console.print("[dim]No ADD trades needed — portfolio is balanced.[/dim]")
     else:
-        console.print("[dim]Dry run. Use --execute to place paper buy orders for ADD signals.[/dim]")
+        console.print("[dim bright_cyan]Dry run. Use --execute to place paper buy orders for ADD signals.[/dim bright_cyan]")
 
 
 @click.command()
@@ -140,27 +140,27 @@ def backtest(ticker, period, capital, compare):
     """Backtest RSI strategy on a ticker: buffet-bot backtest AAPL --period 2 --capital 10000"""
     ticker = ticker.upper()
     console.print(Panel(
-        f"[bold]{ticker}[/bold]  |  Period: {period:.1f}yr  |  Capital: ${capital:,.0f}",
-        title="Backtesting", border_style="blue"))
+        f"[bold bright_white]{ticker}[/bold bright_white]  |  Period: {period:.1f}yr  |  Capital: [bright_green]${capital:,.0f}[/bright_green]",
+        title=_make_panel_title("Backtesting", "bright_cyan"), border_style="bright_cyan", box=box.ROUNDED))
 
-    with console.status("[bold blue]Running backtest...[/bold blue]"):
+    with console.status("[dim]Running backtest...[/dim]"):
         metrics, equity_curve, dates, spy_metrics = _run_backtest(
             ticker, period, capital, compare_spy=compare)
 
     if metrics is None:
-        console.print("[red]Backtest failed — insufficient data (need ≥60 bars).[/red]")
+        console.print("[bright_red]Backtest failed — insufficient data (need ≥60 bars).[/bright_red]")
         return
 
-    tbl = Table(title="Backtest Results", box=box.ROUNDED, header_style="bold blue")
-    tbl.add_column("Metric", style="bold")
-    tbl.add_column(ticker, justify="right")
+    tbl = Table(title=f"[bold bright_cyan]Backtest Results[/bold bright_cyan] — {ticker}", box=box.ROUNDED, header_style="bold bright_cyan")
+    tbl.add_column("Metric", style="bold bright_white")
+    tbl.add_column(ticker, justify="right", style="bright_white")
     if spy_metrics:
-        tbl.add_column("SPY (B&H)", justify="right", style="dim")
+        tbl.add_column("SPY (B&H)", justify="right", style="dim bright_white")
 
     def _mrow(label, key, fmt_fn, color_fn):
         val     = metrics.get(key)
         val_str = fmt_fn(val) if val is not None else "—"
-        color   = color_fn(val) if val is not None else "white"
+        color   = color_fn(val) if val is not None else "bright_white"
         row     = [label, f"[{color}]{val_str}[/{color}]"]
         if spy_metrics:
             sv      = spy_metrics.get(key)
@@ -168,21 +168,21 @@ def backtest(ticker, period, capital, compare):
         tbl.add_row(*row)
 
     _mrow("Total Return",  "total_return",  lambda v: f"{v:.1%}",
-          lambda v: "green" if v > 0 else "red")
+          lambda v: "bright_green" if v > 0 else "bright_red")
     _mrow("CAGR",          "cagr",          lambda v: f"{v:.1%}",
-          lambda v: "green" if v > 0.09 else "yellow" if v > 0 else "red")
+          lambda v: "bright_green" if v > 0.09 else "bright_yellow" if v > 0 else "bright_red")
     _mrow("Sharpe Ratio",  "sharpe",        lambda v: f"{v:.2f}",
-          lambda v: "green" if v > 1 else "yellow" if v > 0.5 else "red")
+          lambda v: "bright_green" if v > 1 else "bright_yellow" if v > 0.5 else "bright_red")
     _mrow("Max Drawdown",  "max_drawdown",  lambda v: f"{v:.1%}",
-          lambda v: "green" if v < 0.20 else "yellow" if v < 0.30 else "red")
+          lambda v: "bright_green" if v < 0.20 else "bright_yellow" if v < 0.30 else "bright_red")
     _mrow("Win Rate",      "win_rate",      lambda v: f"{v:.1%}",
-          lambda v: "green" if v >= 0.5 else "yellow")
-    _mrow("Avg Win ($)",   "avg_win",       lambda v: f"${v:.2f}",  lambda v: "green")
-    _mrow("Avg Loss ($)",  "avg_loss",      lambda v: f"${v:.2f}",  lambda v: "red")
+          lambda v: "bright_green" if v >= 0.5 else "bright_yellow")
+    _mrow("Avg Win ($)",   "avg_win",       lambda v: f"${v:.2f}",  lambda v: "bright_green")
+    _mrow("Avg Loss ($)",  "avg_loss",      lambda v: f"${v:.2f}",  lambda v: "bright_red")
     _mrow("Profit Factor", "profit_factor",
           lambda v: f"{v:.2f}" if v != float('inf') else "∞",
-          lambda v: "green" if v >= 1.5 else "yellow" if v >= 1 else "red")
-    _mrow("# Trades",      "n_trades",      lambda v: str(int(v)),  lambda v: "white")
+          lambda v: "bright_green" if v >= 1.5 else "bright_yellow" if v >= 1 else "bright_red")
+    _mrow("# Trades",      "n_trades",      lambda v: str(int(v)),  lambda v: "bright_white")
 
     console.print(tbl)
 
