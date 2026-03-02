@@ -35,7 +35,8 @@
 - `scan --notify` + `--min-score`: plain-text cron/email report mode for `scan`
 - `TAX_LOSS` signal in `_check_sell_signals(tlh_pct=5.0)` + `--tlh-threshold` on `check-sells`
 - `run-plan` scheduler CLI wiring: `--schedule NAME FREQ`, `--run-due` on `plans` command; Schedule + Last Run columns in `plans` list; `_is_plan_due` / `_set_plan_schedule` / `_mark_plan_ran` helpers were already in main.py
-- ROADMAP: all v0.5.0 Automation + Risk items marked `[x]`; analyst consensus ratings deferred to backlog
+- Analyst consensus: `get_analyst_consensus()` via yfinance `info` dict — rating, target price, upside %, analyst count, recent upgrades/downgrades; wired into `_run_analysis` + `analyze` output panel
+- ROADMAP: all v0.5.0 items marked `[x]`; Performance items (async ADR, profiling) deferred to v1.0.0
 **Next:** PM/Release Manager — bump version to `0.5.0`, write CHANGELOG, tag release
 
 ---
@@ -145,7 +146,7 @@
 - [x] [ENG] `alerts check` command: evaluate all set alerts and report — complete 2026-03-01
 
 ### Signals
-- [ ] [SCRAPER+ENG] Analyst consensus ratings (Nasdaq API or similar)
+- [x] [ENG] Analyst consensus ratings — `get_analyst_consensus()` via yfinance `info` dict (rating key, target price, upside %, analyst count, recent upgrades/downgrades); wired into `_run_analysis` concurrent fetch (max_workers 9); `analyst_block` injected into LLM prompt; Rich panel in `analyze` output — complete 2026-03-01
 - [x] [ENG] Multi-timeframe analysis: 1d, 1w, 1mo signals combined — `get_multiframe_signals()` (daily/weekly RSI-14, monthly SMA trend, 50-day SMA position) wired into `_run_analysis` concurrent fetch (max_workers 8); `multiframe_block` injected into LLM prompt — complete 2026-03-01
 - [x] [ENG] Earnings surprise tracker: log beat/miss history in SQLite — `earnings_surprises` table, `log_earnings_result()`, `get_earnings_history()`; `beats log` / `beats show` CLI commands — complete 2026-03-01
 
