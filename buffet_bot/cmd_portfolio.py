@@ -207,11 +207,11 @@ def correlate():
     try:
         positions = trading_client.get_all_positions()
     except Exception as e:
-        console.print(f"[red]Could not fetch positions: {e}[/red]")
+        console.print(f"[bright_red]Could not fetch positions: {e}[/bright_red]")
         return
 
     if len(positions) < 2:
-        console.print("[yellow]Need at least 2 open positions for correlation analysis.[/yellow]")
+        console.print("[bright_yellow]Need at least 2 open positions for correlation analysis.[/bright_yellow]")
         return
 
     tickers = [p.symbol for p in positions]
@@ -226,16 +226,16 @@ def correlate():
         returns = close_data.pct_change().dropna()
         corr    = returns.corr()
     except Exception as e:
-        console.print(f"[red]Correlation error: {e}[/red]")
+        console.print(f"[bright_red]Correlation error: {e}[/bright_red]")
         return
 
     valid_tickers = [t for t in tickers if t in corr.columns]
 
-    tbl = Table(title="Correlation Matrix (6-month daily returns)",
-                box=box.ROUNDED, header_style="bold blue")
-    tbl.add_column("", style="bold cyan")
+    tbl = Table(title=f"[bold bright_cyan]Correlation Matrix[/bold bright_cyan] (6-month daily returns)",
+                box=box.ROUNDED, header_style="bold bright_cyan")
+    tbl.add_column("", style="bold bright_cyan")
     for t in valid_tickers:
-        tbl.add_column(t, justify="right")
+        tbl.add_column(t, justify="right", style="bright_white")
 
     for t1 in valid_tickers:
         row = [t1]
@@ -244,7 +244,7 @@ def correlate():
                 row.append("[dim]1.00[/dim]")
             else:
                 val   = float(corr.loc[t1, t2])
-                color = "green" if abs(val) < 0.3 else "yellow" if abs(val) < 0.6 else "red"
+                color = "bright_green" if abs(val) < 0.3 else "bright_yellow" if abs(val) < 0.6 else "bright_red"
                 row.append(f"[{color}]{val:.2f}[/{color}]")
         tbl.add_row(*row)
 
@@ -254,9 +254,9 @@ def correlate():
     if pairs:
         avg_abs   = float(np.mean([abs(corr.loc[t1, t2]) for t1, t2 in pairs]))
         diversity = 1 - avg_abs
-        color     = "green" if diversity > 0.7 else "yellow" if diversity > 0.4 else "red"
+        color     = "bright_green" if diversity > 0.7 else "bright_yellow" if diversity > 0.4 else "bright_red"
         console.print(
-            f"\n[bold]Diversity Score:[/bold] [{color}]{diversity:.2f}[/{color}]  "
+            f"\n[bold bright_cyan]Diversity Score:[/bold bright_cyan] [{color}]{diversity:.2f}[/{color}]  "
             "[dim](1.0 = fully uncorrelated  0.0 = identical moves)[/dim]")
 
     _show_sector_table(valid_tickers)
@@ -272,26 +272,26 @@ def check_sells(execute, tlh_pct):
     try:
         positions = trading_client.get_all_positions()
     except Exception as e:
-        console.print(f"[red]Could not fetch positions: {e}[/red]")
+        console.print(f"[bright_red]Could not fetch positions: {e}[/bright_red]")
         return
 
     if not positions:
-        console.print("[yellow]No open positions.[/yellow]")
+        console.print("[bright_yellow]No open positions.[/bright_yellow]")
         return
 
     console.print(f"[dim]Checking {len(positions)} position(s) for sell signals...[/dim]")
-    with console.status("[bold blue]Analyzing signals...[/bold blue]"):
+    with console.status("[dim]Analyzing signals...[/dim]"):
         results = _check_sell_signals(positions, tlh_pct=tlh_pct)
 
-    tbl = Table(title="Sell Signal Analysis", box=box.ROUNDED, header_style="bold blue")
-    tbl.add_column("Ticker",  style="bold cyan")
-    tbl.add_column("Entry",   justify="right")
-    tbl.add_column("Current", justify="right")
-    tbl.add_column("P&L%",    justify="right")
-    tbl.add_column("B.Score", justify="right")
-    tbl.add_column("RSI",     justify="right")
-    tbl.add_column("Signals")
-    tbl.add_column("Rec.")
+    tbl = Table(title=f"[bold bright_red]Sell Signal Analysis[/bold bright_red]", box=box.ROUNDED, header_style="bold bright_cyan")
+    tbl.add_column("Ticker",  style="bold bright_cyan")
+    tbl.add_column("Entry",   justify="right", style="bright_white")
+    tbl.add_column("Current", justify="right", style="bright_white")
+    tbl.add_column("P&L%",    justify="right", style="bright_white")
+    tbl.add_column("B.Score", justify="right", style="bright_white")
+    tbl.add_column("RSI",     justify="right", style="bright_white")
+    tbl.add_column("Signals", style="bright_white")
+    tbl.add_column("Rec.", style="bright_white")
 
     sell_flagged = []
     for pos, signals, b_score, rsi_val in results:
@@ -302,17 +302,17 @@ def check_sells(execute, tlh_pct):
         except Exception:
             entry = current = pnl_pct = 0.0
 
-        pnl_color = "green" if pnl_pct >= 0 else "red"
+        pnl_color = "bright_green" if pnl_pct >= 0 else "bright_red"
         s_color   = _score_color(b_score)
         sig_text  = ", ".join(signals) if signals else "—"
 
         if {'STOP', 'THESIS_BROKEN'} & set(signals):
-            rec = "[bold red]SELL[/bold red]"
+            rec = "[bold bright_red]SELL[/bold bright_red]"
             sell_flagged.append(pos)
         elif signals:
-            rec = "[bold yellow]REVIEW[/bold yellow]"
+            rec = "[bold bright_yellow]REVIEW[/bold bright_yellow]"
         else:
-            rec = "[bold green]HOLD[/bold green]"
+            rec = "[bold bright_green]HOLD[/bold bright_green]"
 
         tbl.add_row(
             pos.symbol,
@@ -336,7 +336,7 @@ def check_sells(execute, tlh_pct):
         )
 
     if execute and sell_flagged:
-        console.print(f"\n[bold red]Selling: {', '.join(p.symbol for p in sell_flagged)}[/bold red]")
+        console.print(f"\n[bold bright_red]Selling: {', '.join(p.symbol for p in sell_flagged)}[/bold bright_red]")
         if click.confirm("Confirm sells? (Paper)"):
             for pos in sell_flagged:
                 try:
@@ -347,11 +347,11 @@ def check_sells(execute, tlh_pct):
                         time_in_force=TimeInForce.DAY,
                     )
                     result = trading_client.submit_order(order)
-                    console.print(f"[green]SELL {pos.symbol} submitted: {result.id}[/green]")
+                    console.print(f"[bright_green]SELL {pos.symbol} submitted: {result.id}[/bright_green]")
                 except Exception as e:
-                    console.print(f"[red]Error selling {pos.symbol}: {e}[/red]")
+                    console.print(f"[bright_red]Error selling {pos.symbol}: {e}[/bright_red]")
     elif sell_flagged and not execute:
-        console.print("\n[dim]To execute these sells: buffet-bot check-sells --execute[/dim]")
+        console.print("\n[dim bright_cyan]To execute these sells: buffet-bot check-sells --execute[/dim bright_cyan]")
 
 
 @click.command()
@@ -373,35 +373,35 @@ def var(confidence, days):
     try:
         positions = trading_client.get_all_positions()
     except Exception as e:
-        console.print(f"[red]Could not fetch positions: {e}[/red]")
+        console.print(f"[bright_red]Could not fetch positions: {e}[/bright_red]")
         return
 
     if not positions:
-        console.print("[yellow]No open positions. Open some trades first.[/yellow]")
+        console.print("[bright_yellow]No open positions. Open some trades first.[/bright_yellow]")
         return
 
     pct_str = f"{int(confidence * 100)}%"
-    with console.status(f"[bold blue]Fetching {days}d price history for VaR...[/bold blue]"):
+    with console.status(f"[dim]Fetching {days}d price history for VaR...[/dim]"):
         result = _calculate_portfolio_var(positions, confidence=confidence, lookback_days=days)
 
     if result is None:
-        console.print("[yellow]Insufficient price history to calculate VaR "
-                      "(need at least 30 trading days).[/yellow]")
+        console.print("[bright_yellow]Insufficient price history to calculate VaR "
+                      "(need at least 30 trading days).[/bright_yellow]")
         return
 
     tail_pct = 100 - int(confidence * 100)
     console.print(Panel(
-        f"Portfolio value:     [bold]${result['portfolio_val']:,.2f}[/bold]\n"
+        f"Portfolio value:     [bold bright_white]${result['portfolio_val']:,.2f}[/bold bright_white]\n"
         f"Positions:           [dim]{', '.join(result['tickers'])}[/dim]\n"
         f"History used:        {result['n_days']} trading days\n\n"
-        f"{pct_str} 1-Day VaR:   [bold red]-${result['var_1d']:,.2f}[/bold red]  "
-        f"([bold red]{result['var_pct']:.2f}%[/bold red] of portfolio)\n"
-        f"{pct_str} CVaR (ES):   [bold red]-${result['cvar_1d']:,.2f}[/bold red]  "
+        f"{pct_str} 1-Day VaR:   [bold bright_red]-${result['var_1d']:,.2f}[/bold bright_red]  "
+        f"([bold bright_red]{result['var_pct']:.2f}%[/bold bright_red] of portfolio)\n"
+        f"{pct_str} CVaR (ES):   [bold bright_red]-${result['cvar_1d']:,.2f}[/bold bright_red]  "
         f"[dim](expected loss beyond VaR)[/dim]\n\n"
         f"[dim]On the worst {tail_pct}% of trading days, this portfolio is "
         f"expected to lose more than ${result['var_1d']:,.2f}.[/dim]",
-        title=f"[bold]Portfolio Value at Risk — {pct_str} / 1-Day[/bold]",
-        border_style="red",
+        title=_make_panel_title(f"Portfolio Value at Risk — {pct_str} / 1-Day", "bright_red"),
+        border_style="bright_red", box=box.ROUNDED,
     ))
 
 
@@ -421,23 +421,23 @@ def forecast(years, monthly, primary_model):
         positions = trading_client.get_all_positions()
         account   = trading_client.get_account()
     except Exception as e:
-        console.print(f"[red]Could not fetch portfolio: {e}[/red]")
+        console.print(f"[bright_red]Could not fetch portfolio: {e}[/bright_red]")
         return
 
     if not positions:
-        console.print("[yellow]No open positions found. Buy some stocks first, or use 'buffet-bot whatif' for a hypothetical.[/yellow]")
+        console.print("[bright_yellow]No open positions found. Buy some stocks first, or use 'buffet-bot whatif' for a hypothetical.[/bright_yellow]")
         return
 
     total_value = sum(float(p.market_value) for p in positions)
     cash        = float(account.cash)
 
     # Show current holdings
-    tbl = Table(title="Current Holdings", box=box.ROUNDED, header_style="bold blue")
-    tbl.add_column("Ticker", style="bold cyan")
-    tbl.add_column("Qty",    justify="right")
-    tbl.add_column("Price",  justify="right")
-    tbl.add_column("Value",  justify="right")
-    tbl.add_column("Weight", justify="right")
+    tbl = Table(title=f"[bold bright_cyan]Current Holdings[/bold bright_cyan]", box=box.ROUNDED, header_style="bold bright_cyan")
+    tbl.add_column("Ticker", style="bold bright_cyan")
+    tbl.add_column("Qty",    justify="right", style="bright_white")
+    tbl.add_column("Price",  justify="right", style="bright_white")
+    tbl.add_column("Value",  justify="right", style="bright_white")
+    tbl.add_column("Weight", justify="right", style="bright_white")
     for p in positions:
         mv = float(p.market_value)
         tbl.add_row(
@@ -450,18 +450,18 @@ def forecast(years, monthly, primary_model):
     console.print(tbl)
     console.print(f"[dim]Total invested: ${total_value:,.2f}  |  Cash: ${cash:,.2f}[/dim]\n")
 
-    console.print("[bold]Querying AI for per-holding return estimates...[/bold]")
+    console.print("[bold bright_cyan]Querying AI for per-holding return estimates...[/bold bright_cyan]")
     portfolio_est = _get_portfolio_expected_return(positions, primary_model)
     base_return   = portfolio_est['weighted_return']
     volatility    = portfolio_est['weighted_volatility']
 
     # Per-ticker table
-    tbl2 = Table(title="AI Return Estimates", box=box.SIMPLE, header_style="bold dim")
-    tbl2.add_column("Ticker", style="cyan")
-    tbl2.add_column("Weight",    justify="right")
-    tbl2.add_column("Est. Return", justify="right")
-    tbl2.add_column("Est. Vol",    justify="right")
-    tbl2.add_column("Rationale")
+    tbl2 = Table(title=f"[bold bright_yellow]AI Return Estimates[/bold bright_yellow]", box=box.ROUNDED, header_style="bold bright_cyan")
+    tbl2.add_column("Ticker", style="bold bright_cyan")
+    tbl2.add_column("Weight",    justify="right", style="bright_white")
+    tbl2.add_column("Est. Return", justify="right", style="bright_white")
+    tbl2.add_column("Est. Vol",    justify="right", style="bright_white")
+    tbl2.add_column("Rationale", style="dim bright_white")
     for sym, d in portfolio_est['per_ticker'].items():
         tbl2.add_row(
             sym,
@@ -471,8 +471,8 @@ def forecast(years, monthly, primary_model):
             d.get('rationale', '')[:60],
         )
     console.print(tbl2)
-    console.print(f"\n[bold]Portfolio weighted return:[/bold] [cyan]{base_return:.1%}[/cyan]  "
-                  f"[bold]Volatility:[/bold] [yellow]{volatility:.1%}[/yellow]\n")
+    console.print(f"\n[bold bright_cyan]Portfolio weighted return:[/bold bright_cyan] [bright_green]{base_return:.1%}[/bright_green]  "
+                  f"[bold bright_cyan]Volatility:[/bold bright_cyan] [bright_yellow]{volatility:.1%}[/bright_yellow]\n")
 
     # Monte Carlo at checkpoints
     all_checkpoints = [y for y in [1, 2, 3, 5, 10, 20, 30] if y <= years]
