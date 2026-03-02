@@ -47,7 +47,7 @@ def mock_buffett_strong():
 def in_memory_db(monkeypatch, tmp_path):
     """Patch DB_PATH to a temp file, initialize the schema, yield the path."""
     db_path = str(tmp_path / 'test.db')
-    monkeypatch.setattr('buffet_bot.main.DB_PATH', db_path)
-    from buffet_bot.main import init_db
+    monkeypatch.setattr('buffet_bot.db.DB_PATH', db_path)
+    from buffet_bot.db import init_db
     init_db()
     yield db_path

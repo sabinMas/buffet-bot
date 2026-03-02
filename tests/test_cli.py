@@ -40,8 +40,8 @@ class TestAnalyzeCommand:
     def test_json_output_contains_required_keys(self, runner):
         """--json flag: output is valid JSON with all required top-level keys."""
         result_data = _make_analysis_result('BUY')
-        with patch('buffet_bot.main._run_analysis', return_value=result_data):
-            with patch('buffet_bot.main.is_crypto_symbol', return_value=False):
+        with patch('buffet_bot.cmd_trading._run_analysis', return_value=result_data):
+            with patch('buffet_bot.cmd_trading.is_crypto_symbol', return_value=False):
                 result = runner.invoke(cli, ['analyze', 'AAPL', '--json'])
 
         assert result.exit_code == 0, result.output
@@ -52,8 +52,8 @@ class TestAnalyzeCommand:
     def test_json_ticker_is_uppercased(self, runner):
         """Ticker argument is normalised to uppercase in JSON output."""
         result_data = _make_analysis_result('HOLD')
-        with patch('buffet_bot.main._run_analysis', return_value=result_data):
-            with patch('buffet_bot.main.is_crypto_symbol', return_value=False):
+        with patch('buffet_bot.cmd_trading._run_analysis', return_value=result_data):
+            with patch('buffet_bot.cmd_trading.is_crypto_symbol', return_value=False):
                 result = runner.invoke(cli, ['analyze', 'aapl', '--json'])
 
         assert result.exit_code == 0, result.output
@@ -63,8 +63,8 @@ class TestAnalyzeCommand:
     def test_json_consensus_reflects_mock(self, runner):
         """JSON output consensus matches what _run_analysis returned."""
         result_data = _make_analysis_result('HOLD')
-        with patch('buffet_bot.main._run_analysis', return_value=result_data):
-            with patch('buffet_bot.main.is_crypto_symbol', return_value=False):
+        with patch('buffet_bot.cmd_trading._run_analysis', return_value=result_data):
+            with patch('buffet_bot.cmd_trading.is_crypto_symbol', return_value=False):
                 result = runner.invoke(cli, ['analyze', 'AAPL', '--json'])
 
         data = json.loads(result.output)
@@ -73,8 +73,8 @@ class TestAnalyzeCommand:
     def test_json_buffett_score_matches_mock(self, runner):
         """buffett_score in JSON equals the score from the mocked analysis."""
         result_data = _make_analysis_result('BUY', score=82)
-        with patch('buffet_bot.main._run_analysis', return_value=result_data):
-            with patch('buffet_bot.main.is_crypto_symbol', return_value=False):
+        with patch('buffet_bot.cmd_trading._run_analysis', return_value=result_data):
+            with patch('buffet_bot.cmd_trading.is_crypto_symbol', return_value=False):
                 result = runner.invoke(cli, ['analyze', 'AAPL', '--json'])
 
         data = json.loads(result.output)
@@ -83,8 +83,8 @@ class TestAnalyzeCommand:
     def test_json_price_matches_mock(self, runner):
         """price in JSON equals the realtime price from the mocked analysis."""
         result_data = _make_analysis_result('BUY', price=200.0)
-        with patch('buffet_bot.main._run_analysis', return_value=result_data):
-            with patch('buffet_bot.main.is_crypto_symbol', return_value=False):
+        with patch('buffet_bot.cmd_trading._run_analysis', return_value=result_data):
+            with patch('buffet_bot.cmd_trading.is_crypto_symbol', return_value=False):
                 result = runner.invoke(cli, ['analyze', 'AAPL', '--json'])
 
         data = json.loads(result.output)
@@ -93,8 +93,8 @@ class TestAnalyzeCommand:
     def test_crypto_symbol_routes_to_crypto_handler(self, runner):
         """BTC/USD should route to _analyze_crypto, not _run_analysis."""
         mock_crypto = MagicMock()
-        with patch('buffet_bot.main.is_crypto_symbol', return_value=True):
-            with patch('buffet_bot.main._analyze_crypto', mock_crypto):
+        with patch('buffet_bot.cmd_trading.is_crypto_symbol', return_value=True):
+            with patch('buffet_bot.cmd_trading._analyze_crypto', mock_crypto):
                 result = runner.invoke(cli, ['analyze', 'BTC/USD'])
 
         assert result.exit_code == 0
@@ -124,7 +124,7 @@ class TestScanCommand:
 
     def test_json_output_is_valid_json(self, runner):
         """--json flag: output is a non-empty JSON array."""
-        with patch('buffet_bot.main.get_buffett_metrics', return_value=self._mock_metrics()):
+        with patch('buffet_bot.cmd_trading.get_buffett_metrics', return_value=self._mock_metrics()):
             result = runner.invoke(cli, ['scan', '--json'])
 
         assert result.exit_code == 0, result.output
@@ -134,7 +134,7 @@ class TestScanCommand:
 
     def test_json_each_item_has_ticker_and_score(self, runner):
         """Each item in JSON output has 'ticker' and 'buffett_score' keys."""
-        with patch('buffet_bot.main.get_buffett_metrics', return_value=self._mock_metrics(70)):
+        with patch('buffet_bot.cmd_trading.get_buffett_metrics', return_value=self._mock_metrics(70)):
             result = runner.invoke(cli, ['scan', '--json'])
 
         data = json.loads(result.output)
@@ -144,7 +144,7 @@ class TestScanCommand:
 
     def test_top_flag_limits_results(self, runner):
         """--top 3 returns at most 3 tickers in JSON output."""
-        with patch('buffet_bot.main.get_buffett_metrics', return_value=self._mock_metrics()):
+        with patch('buffet_bot.cmd_trading.get_buffett_metrics', return_value=self._mock_metrics()):
             result = runner.invoke(cli, ['scan', '--json', '--top', '3'])
 
         assert result.exit_code == 0, result.output
@@ -154,7 +154,7 @@ class TestScanCommand:
     def test_top_zero_returns_all_tickers(self, runner):
         """--top 0 returns all default tickers in JSON output."""
         default_tickers = ['AAPL', 'MSFT', 'GOOGL', 'BRK-B', 'JNJ', 'V', 'JPM', 'PG']
-        with patch('buffet_bot.main.get_buffett_metrics', return_value=self._mock_metrics()):
+        with patch('buffet_bot.cmd_trading.get_buffett_metrics', return_value=self._mock_metrics()):
             result = runner.invoke(cli, ['scan', '--json', '--top', '0'])
 
         assert result.exit_code == 0, result.output
@@ -169,7 +169,7 @@ class TestScanCommand:
         def _metrics(ticker):
             return {'score': scores.get(ticker, 0)}
 
-        with patch('buffet_bot.main.get_buffett_metrics', side_effect=_metrics):
+        with patch('buffet_bot.cmd_trading.get_buffett_metrics', side_effect=_metrics):
             result = runner.invoke(cli, ['scan', '--json', '--top', '0'])
 
         data = json.loads(result.output)
@@ -178,12 +178,12 @@ class TestScanCommand:
 
     def test_watchlist_flag_uses_saved_watchlist(self, runner, in_memory_db, monkeypatch):
         """--watchlist flag: if watchlist has tickers, those are scanned."""
-        monkeypatch.setattr('buffet_bot.main.DB_PATH', in_memory_db)
-        from buffet_bot.main import add_to_watchlist
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', in_memory_db)
+        from buffet_bot.db import add_to_watchlist
         add_to_watchlist('NVDA')
         add_to_watchlist('AMD')
 
-        with patch('buffet_bot.main.get_buffett_metrics', return_value=self._mock_metrics()):
+        with patch('buffet_bot.cmd_trading.get_buffett_metrics', return_value=self._mock_metrics()):
             result = runner.invoke(cli, ['scan', '--watchlist', '--json', '--top', '0'])
 
         assert result.exit_code == 0, result.output
@@ -207,7 +207,7 @@ class TestStatusCommand:
     def test_exits_zero_with_mocked_account(self, runner):
         """status exits 0 when trading_client.get_account() is mocked."""
         mock_acct = self._mock_account()
-        with patch('buffet_bot.main.trading_client') as mock_tc:
+        with patch('buffet_bot.cmd_trading.trading_client') as mock_tc:
             mock_tc.get_account.return_value = mock_acct
             with patch.dict('os.environ', {'COINBASE_API_KEY': '', 'IBKR_ACCOUNT_ID': ''}):
                 result = runner.invoke(cli, ['status'])
@@ -216,7 +216,7 @@ class TestStatusCommand:
     def test_output_contains_alpaca_panel_header(self, runner):
         """Output includes 'Alpaca Paper Account' text."""
         mock_acct = self._mock_account()
-        with patch('buffet_bot.main.trading_client') as mock_tc:
+        with patch('buffet_bot.cmd_trading.trading_client') as mock_tc:
             mock_tc.get_account.return_value = mock_acct
             with patch.dict('os.environ', {'COINBASE_API_KEY': '', 'IBKR_ACCOUNT_ID': ''}):
                 result = runner.invoke(cli, ['status'])
@@ -225,7 +225,7 @@ class TestStatusCommand:
     def test_output_contains_cash_value(self, runner):
         """Output contains the formatted cash amount."""
         mock_acct = self._mock_account(cash=12_345.67)
-        with patch('buffet_bot.main.trading_client') as mock_tc:
+        with patch('buffet_bot.cmd_trading.trading_client') as mock_tc:
             mock_tc.get_account.return_value = mock_acct
             with patch.dict('os.environ', {'COINBASE_API_KEY': '', 'IBKR_ACCOUNT_ID': ''}):
                 result = runner.invoke(cli, ['status'])
@@ -234,11 +234,11 @@ class TestStatusCommand:
     def test_coinbase_not_configured_message_when_no_key(self, runner):
         """Without COINBASE_API_KEY, output mentions Coinbase not configured."""
         mock_acct = self._mock_account()
-        with patch('buffet_bot.main.trading_client') as mock_tc:
+        with patch('buffet_bot.cmd_trading.trading_client') as mock_tc:
             mock_tc.get_account.return_value = mock_acct
             with patch.dict('os.environ', {'COINBASE_API_KEY': '', 'IBKR_ACCOUNT_ID': ''},
                             clear=False):
-                with patch('buffet_bot.main.os.getenv', side_effect=lambda k, *a: {
+                with patch('buffet_bot.cmd_trading.os.getenv', side_effect=lambda k, *a: {
                     'COINBASE_API_KEY': '',
                     'IBKR_ACCOUNT_ID': '',
                 }.get(k, '')):
@@ -249,7 +249,7 @@ class TestStatusCommand:
     def test_ibkr_not_configured_message_when_no_account_id(self, runner):
         """Without IBKR_ACCOUNT_ID, status must still succeed."""
         mock_acct = self._mock_account()
-        with patch('buffet_bot.main.trading_client') as mock_tc:
+        with patch('buffet_bot.cmd_trading.trading_client') as mock_tc:
             mock_tc.get_account.return_value = mock_acct
             result = runner.invoke(cli, ['status'])
         # Status always exits 0 as long as Alpaca call doesn't raise
@@ -263,51 +263,51 @@ class TestWatchlistCommands:
 
     def test_add_exits_zero(self, runner, in_memory_db, monkeypatch):
         """watchlist add TSLA exits 0."""
-        monkeypatch.setattr('buffet_bot.main.DB_PATH', in_memory_db)
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', in_memory_db)
         result = runner.invoke(cli, ['watchlist', 'add', 'TSLA'])
         assert result.exit_code == 0, result.output
 
     def test_add_confirmation_message(self, runner, in_memory_db, monkeypatch):
         """watchlist add prints a confirmation containing the ticker."""
-        monkeypatch.setattr('buffet_bot.main.DB_PATH', in_memory_db)
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', in_memory_db)
         result = runner.invoke(cli, ['watchlist', 'add', 'NVDA'])
         assert 'NVDA' in result.output
 
     def test_add_uppercase_normalisation(self, runner, in_memory_db, monkeypatch):
         """Lowercase ticker is normalised to uppercase in confirmation."""
-        monkeypatch.setattr('buffet_bot.main.DB_PATH', in_memory_db)
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', in_memory_db)
         result = runner.invoke(cli, ['watchlist', 'add', 'msft'])
         assert 'MSFT' in result.output
 
     def test_remove_exits_zero_for_existing_ticker(self, runner, in_memory_db, monkeypatch):
         """watchlist remove on an existing ticker exits 0."""
-        monkeypatch.setattr('buffet_bot.main.DB_PATH', in_memory_db)
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', in_memory_db)
         runner.invoke(cli, ['watchlist', 'add', 'AAPL'])
         result = runner.invoke(cli, ['watchlist', 'remove', 'AAPL'])
         assert result.exit_code == 0, result.output
 
     def test_remove_exits_zero_for_nonexistent_ticker(self, runner, in_memory_db, monkeypatch):
         """watchlist remove on a ticker that was never added exits 0 (silent)."""
-        monkeypatch.setattr('buffet_bot.main.DB_PATH', in_memory_db)
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', in_memory_db)
         result = runner.invoke(cli, ['watchlist', 'remove', 'UNKNOWN'])
         assert result.exit_code == 0, result.output
 
     def test_show_exits_zero_when_empty(self, runner, in_memory_db, monkeypatch):
         """watchlist show with empty list exits 0."""
-        monkeypatch.setattr('buffet_bot.main.DB_PATH', in_memory_db)
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', in_memory_db)
         result = runner.invoke(cli, ['watchlist', 'show'])
         assert result.exit_code == 0, result.output
 
     def test_show_displays_added_tickers(self, runner, in_memory_db, monkeypatch):
         """After add, watchlist show output contains the added ticker."""
-        monkeypatch.setattr('buffet_bot.main.DB_PATH', in_memory_db)
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', in_memory_db)
         runner.invoke(cli, ['watchlist', 'add', 'GOOGL'])
         result = runner.invoke(cli, ['watchlist', 'show'])
         assert 'GOOGL' in result.output
 
     def test_show_does_not_display_removed_ticker(self, runner, in_memory_db, monkeypatch):
         """Ticker removed via CLI is absent from subsequent show output."""
-        monkeypatch.setattr('buffet_bot.main.DB_PATH', in_memory_db)
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', in_memory_db)
         runner.invoke(cli, ['watchlist', 'add', 'META'])
         runner.invoke(cli, ['watchlist', 'remove', 'META'])
         result = runner.invoke(cli, ['watchlist', 'show'])
@@ -317,7 +317,7 @@ class TestWatchlistCommands:
 
     def test_add_duplicate_is_idempotent(self, runner, in_memory_db, monkeypatch):
         """Adding the same ticker twice does not produce an error."""
-        monkeypatch.setattr('buffet_bot.main.DB_PATH', in_memory_db)
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', in_memory_db)
         r1 = runner.invoke(cli, ['watchlist', 'add', 'JPM'])
         r2 = runner.invoke(cli, ['watchlist', 'add', 'JPM'])
         assert r1.exit_code == 0

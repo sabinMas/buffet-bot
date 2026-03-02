@@ -19,7 +19,8 @@
 | 7       | Engineer (v0.5.0 features) | complete |
 | 8       | QA + Engineer (v0.5.0 bugfix) | complete |
 | 9       | Engineer (v0.5.0 finish) | complete |
-| **10 →**| **PM / Release Manager (v0.5.0 release)** | **next** |
+| 10      | Engineer (refactor main.py) | complete |
+| **11 →**| **PM / Release Manager (v0.5.0 release)** | **next** |
 
 **Current milestone:** v0.5.0 (all Automation + Risk + Signal items `[x]`; analyst ratings deferred to backlog)
 **Do NOT take Security Auditor** until v1.0.0 milestone is explicitly started.
@@ -28,6 +29,23 @@
 ---
 
 ## Session Handoff Log
+
+### 2026-03-02 — Engineer (session 10)
+**Role taken:** Engineer (refactor main.py)
+**What was done:**
+- Split `buffet_bot/main.py` (4532 lines) → 13 focused modules:
+  - `globals.py` (constants, API clients, config) — already existed
+  - `db.py`, `data.py`, `display.py`, `analysis.py`, `backtest.py`, `risk.py`, `projections.py`, `plans.py` — already existed
+  - `cmd_trading.py` (ask, lookup, browse, analyze, buy, history, portfolio, chat, scan, status, stream, chart, dashboard)
+  - `cmd_intel.py` (news, insiders, crypto, volatile, options)
+  - `cmd_portfolio.py` (rebalance, backtest, correlate, check_sells, var, forecast, whatif, scenarios, milestones)
+  - `cmd_account.py` (guide, plans, automate, config, alerts, watchlist, beats, completion)
+  - Slim `main.py` (92 lines — imports + cli.add_command registrations)
+- Updated all tests: `test_db.py`, `test_analysis.py`, `test_data_fetching.py`, `test_cli.py`, `test_security.py`, `conftest.py` to import from new module paths
+- All 149 tests pass
+**Next:** PM/Release Manager — bump version to `0.5.0`, write CHANGELOG, tag release
+
+---
 
 ### 2026-03-01 — Engineer (session 9)
 **Role taken:** Engineer (v0.5.0 finish)

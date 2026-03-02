@@ -16,47 +16,43 @@ class TestPlanPathTraversal:
     """_safe_plan_path must never resolve outside PLANS_DIR."""
 
     def test_unix_traversal_blocked(self):
-        from buffet_bot.main import _safe_plan_path
+        from buffet_bot.plans import _safe_plan_path
         with pytest.raises(ValueError):
             _safe_plan_path("../../etc/passwd")
 
     def test_windows_traversal_blocked(self):
-        from buffet_bot.main import _safe_plan_path
+        from buffet_bot.plans import _safe_plan_path
         with pytest.raises(ValueError):
             _safe_plan_path("..\\..\\etc\\passwd")
 
     def test_absolute_path_blocked(self):
-        from buffet_bot.main import _safe_plan_path
+        from buffet_bot.plans import _safe_plan_path
         with pytest.raises(ValueError):
             _safe_plan_path("/etc/passwd")
 
     def test_dotdot_only_blocked(self):
-        from buffet_bot.main import _safe_plan_path
+        from buffet_bot.plans import _safe_plan_path
         with pytest.raises(ValueError):
             _safe_plan_path("..")
 
     def test_deep_traversal_blocked(self):
-        from buffet_bot.main import _safe_plan_path
+        from buffet_bot.plans import _safe_plan_path
         with pytest.raises(ValueError):
             _safe_plan_path("../../../../tmp/evil")
 
     def test_valid_simple_name_accepted(self):
-        from buffet_bot.main import _safe_plan_path
+        from buffet_bot.plans import _safe_plan_path
         path = _safe_plan_path("my-plan")
         assert path.name == "my-plan.json"
 
     def test_valid_name_with_numbers_accepted(self):
-        from buffet_bot.main import _safe_plan_path
+        from buffet_bot.plans import _safe_plan_path
         path = _safe_plan_path("growth-plan-2026")
         assert path.name == "growth-plan-2026.json"
 
     def test_valid_name_stays_inside_plans_dir(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("buffet_bot.main.PLANS_DIR", str(tmp_path))
-        from importlib import reload
-        import buffet_bot.main as m
-        # Reload to pick up patched PLANS_DIR would cause circular issues;
-        # instead call the function directly and verify parent directory.
-        from buffet_bot.main import _safe_plan_path
+        monkeypatch.setattr("buffet_bot.plans.PLANS_DIR", str(tmp_path))
+        from buffet_bot.plans import _safe_plan_path
         import pathlib
         path = _safe_plan_path("safe-plan")
         # The resolved path must be inside the (possibly different) PLANS_DIR
@@ -84,7 +80,7 @@ class TestSQLInjection:
     """SQL metacharacters in user input must not corrupt the database."""
 
     def test_watchlist_add_sql_injection_safe(self, in_memory_db):
-        from buffet_bot.main import add_to_watchlist, get_watchlist
+        from buffet_bot.db import add_to_watchlist, get_watchlist
         # Classic SQL injection attempt
         add_to_watchlist("'; DROP TABLE watchlist; --")
         rows = get_watchlist()
@@ -92,7 +88,7 @@ class TestSQLInjection:
         assert isinstance(rows, list)
 
     def test_watchlist_add_tautology_safe(self, in_memory_db):
-        from buffet_bot.main import add_to_watchlist, get_watchlist
+        from buffet_bot.db import add_to_watchlist, get_watchlist
         add_to_watchlist("' OR '1'='1")
         rows = get_watchlist()
         assert isinstance(rows, list)

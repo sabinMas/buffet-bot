@@ -39,10 +39,10 @@ class TestGetBuffettMetrics:
 
     def _invoke(self, info):
         """Patch yf.Ticker and call get_buffett_metrics('TEST')."""
-        from buffet_bot.main import get_buffett_metrics
+        from buffet_bot.data import get_buffett_metrics
         mock_ticker = MagicMock()
         mock_ticker.info = info
-        with patch('buffet_bot.main.yf.Ticker', return_value=mock_ticker):
+        with patch('buffet_bot.data.yf.Ticker', return_value=mock_ticker):
             return get_buffett_metrics('TEST')
 
     # ── Score boundaries ──────────────────────────────────────────────────────
@@ -157,8 +157,8 @@ class TestGetBuffettMetrics:
 
     def test_exception_returns_score_zero(self):
         """If yf.Ticker raises, fall back to {'score': 0}."""
-        from buffet_bot.main import get_buffett_metrics
-        with patch('buffet_bot.main.yf.Ticker', side_effect=Exception("network error")):
+        from buffet_bot.data import get_buffett_metrics
+        with patch('buffet_bot.data.yf.Ticker', side_effect=Exception("network error")):
             result = get_buffett_metrics('ERR')
         assert result.get('score', 0) == 0
 
@@ -183,54 +183,54 @@ class TestFetchFredData:
 
     def test_returns_empty_dict_when_no_api_key(self, monkeypatch):
         """FRED_API_KEY is '' → immediately return {}."""
-        monkeypatch.setattr('buffet_bot.main.FRED_API_KEY', '')
-        from buffet_bot.main import _fetch_fred_data
+        monkeypatch.setattr('buffet_bot.data.FRED_API_KEY', '')
+        from buffet_bot.data import _fetch_fred_data
         result = _fetch_fred_data()
         assert result == {}
 
     def test_returns_dict_with_valid_responses(self, monkeypatch):
         """All 3 FRED series respond successfully → dict has 3 keys."""
-        monkeypatch.setattr('buffet_bot.main.FRED_API_KEY', 'test-key')
-        with patch('buffet_bot.main.requests.get', return_value=_mock_fred_obs('5.25')):
-            from buffet_bot.main import _fetch_fred_data
+        monkeypatch.setattr('buffet_bot.data.FRED_API_KEY', 'test-key')
+        with patch('buffet_bot.data.requests.get', return_value=_mock_fred_obs('5.25')):
+            from buffet_bot.data import _fetch_fred_data
             result = _fetch_fred_data()
         assert isinstance(result, dict)
         assert len(result) == 3
 
     def test_fed_rate_key_present_when_api_key_set(self, monkeypatch):
         """'fed_rate' is a key in successful response."""
-        monkeypatch.setattr('buffet_bot.main.FRED_API_KEY', 'test-key')
-        with patch('buffet_bot.main.requests.get', return_value=_mock_fred_obs('5.25')):
-            from buffet_bot.main import _fetch_fred_data
+        monkeypatch.setattr('buffet_bot.data.FRED_API_KEY', 'test-key')
+        with patch('buffet_bot.data.requests.get', return_value=_mock_fred_obs('5.25')):
+            from buffet_bot.data import _fetch_fred_data
             result = _fetch_fred_data()
         assert 'fed_rate' in result
         assert abs(result['fed_rate'] - 5.25) < 1e-6
 
     def test_handles_request_exception_gracefully(self, monkeypatch):
         """Network error → returns {} (all series skipped) — must not raise."""
-        monkeypatch.setattr('buffet_bot.main.FRED_API_KEY', 'test-key')
-        with patch('buffet_bot.main.requests.get', side_effect=Exception("timeout")):
-            from buffet_bot.main import _fetch_fred_data
+        monkeypatch.setattr('buffet_bot.data.FRED_API_KEY', 'test-key')
+        with patch('buffet_bot.data.requests.get', side_effect=Exception("timeout")):
+            from buffet_bot.data import _fetch_fred_data
             result = _fetch_fred_data()
         assert isinstance(result, dict)
 
     def test_skips_series_with_missing_data_value(self, monkeypatch):
         """FRED returns '.' for missing data → ValueError → series is skipped."""
-        monkeypatch.setattr('buffet_bot.main.FRED_API_KEY', 'test-key')
+        monkeypatch.setattr('buffet_bot.data.FRED_API_KEY', 'test-key')
         bad_resp = MagicMock()
         bad_resp.raise_for_status.return_value = None
         bad_resp.json.return_value = {'observations': [{'value': '.'}]}
-        with patch('buffet_bot.main.requests.get', return_value=bad_resp):
-            from buffet_bot.main import _fetch_fred_data
+        with patch('buffet_bot.data.requests.get', return_value=bad_resp):
+            from buffet_bot.data import _fetch_fred_data
             result = _fetch_fred_data()
         # All series skipped due to '.' → dict is empty
         assert result == {}
 
     def test_values_are_floats(self, monkeypatch):
         """Every value in the returned dict is a float."""
-        monkeypatch.setattr('buffet_bot.main.FRED_API_KEY', 'test-key')
-        with patch('buffet_bot.main.requests.get', return_value=_mock_fred_obs('3.14')):
-            from buffet_bot.main import _fetch_fred_data
+        monkeypatch.setattr('buffet_bot.data.FRED_API_KEY', 'test-key')
+        with patch('buffet_bot.data.requests.get', return_value=_mock_fred_obs('3.14')):
+            from buffet_bot.data import _fetch_fred_data
             result = _fetch_fred_data()
         for v in result.values():
             assert isinstance(v, float)
@@ -252,9 +252,9 @@ class TestGetEarningsDate:
         """If 'AAPL' never appears in 8 days of results → return None."""
         resp = self._make_nasdaq_resp([{'symbol': 'OTHER', 'time': 'time-after-hours',
                                         'epsForecast': '1.00', 'fiscalQuarterEnding': 'Q1'}])
-        with patch('buffet_bot.main.requests.get', return_value=resp):
-            with patch('buffet_bot.main.time.sleep'):
-                from buffet_bot.main import _get_earnings_date
+        with patch('buffet_bot.data.requests.get', return_value=resp):
+            with patch('buffet_bot.data.time.sleep'):
+                from buffet_bot.data import _get_earnings_date
                 result = _get_earnings_date('AAPL')
         assert result is None
 
@@ -264,9 +264,9 @@ class TestGetEarningsDate:
             'symbol': 'AAPL', 'time': 'time-after-hours',
             'epsForecast': '1.50', 'fiscalQuarterEnding': 'March 2026',
         }])
-        with patch('buffet_bot.main.requests.get', return_value=resp):
-            with patch('buffet_bot.main.time.sleep'):
-                from buffet_bot.main import _get_earnings_date
+        with patch('buffet_bot.data.requests.get', return_value=resp):
+            with patch('buffet_bot.data.time.sleep'):
+                from buffet_bot.data import _get_earnings_date
                 result = _get_earnings_date('AAPL')
         assert result is not None
         assert result['eps_forecast'] == '1.50'
@@ -280,17 +280,17 @@ class TestGetEarningsDate:
             'symbol': 'aapl', 'time': 'time-pre-market',
             'epsForecast': '1.20', 'fiscalQuarterEnding': 'Q2',
         }])
-        with patch('buffet_bot.main.requests.get', return_value=resp):
-            with patch('buffet_bot.main.time.sleep'):
-                from buffet_bot.main import _get_earnings_date
+        with patch('buffet_bot.data.requests.get', return_value=resp):
+            with patch('buffet_bot.data.time.sleep'):
+                from buffet_bot.data import _get_earnings_date
                 result = _get_earnings_date('AAPL')
         assert result is not None
 
     def test_handles_request_exception_gracefully(self):
         """Network errors on all days → returns None, does not raise."""
-        with patch('buffet_bot.main.requests.get', side_effect=Exception("timeout")):
-            with patch('buffet_bot.main.time.sleep'):
-                from buffet_bot.main import _get_earnings_date
+        with patch('buffet_bot.data.requests.get', side_effect=Exception("timeout")):
+            with patch('buffet_bot.data.time.sleep'):
+                from buffet_bot.data import _get_earnings_date
                 result = _get_earnings_date('AAPL')
         assert result is None
 
@@ -299,9 +299,9 @@ class TestGetEarningsDate:
         resp = MagicMock()
         resp.raise_for_status.return_value = None
         resp.json.return_value = {'data': {'rows': None}}
-        with patch('buffet_bot.main.requests.get', return_value=resp):
-            with patch('buffet_bot.main.time.sleep'):
-                from buffet_bot.main import _get_earnings_date
+        with patch('buffet_bot.data.requests.get', return_value=resp):
+            with patch('buffet_bot.data.time.sleep'):
+                from buffet_bot.data import _get_earnings_date
                 result = _get_earnings_date('AAPL')
         assert result is None
 
@@ -327,7 +327,7 @@ class TestGetRealtimeData:
 
     def test_returns_dict_from_alpaca_on_success(self):
         """Happy path: Alpaca API returns valid quote + bar → price is bid/ask mid."""
-        from buffet_bot.main import get_realtime_data
+        from buffet_bot.data import get_realtime_data
         quote = self._make_alpaca_quote(bid=149.0, ask=151.0)
         bar = self._make_alpaca_bar(open_=150.0, high=155.0, low=148.0, volume=500_000)
 
@@ -335,7 +335,7 @@ class TestGetRealtimeData:
         mock_data_client.get_stock_latest_quote.return_value = {'AAPL': quote}
         mock_data_client.get_stock_latest_bar.return_value = {'AAPL': bar}
 
-        with patch('buffet_bot.main.data_client', mock_data_client):
+        with patch('buffet_bot.data.data_client', mock_data_client):
             result = get_realtime_data('AAPL')
 
         assert result['price'] == 150.0          # mid = (149+151)/2
@@ -346,7 +346,7 @@ class TestGetRealtimeData:
 
     def test_change_pct_positive_when_price_above_open(self):
         """price > open → change_pct > 0."""
-        from buffet_bot.main import get_realtime_data
+        from buffet_bot.data import get_realtime_data
         quote = self._make_alpaca_quote(bid=159.0, ask=161.0)  # mid=160
         bar = self._make_alpaca_bar(open_=150.0)
 
@@ -354,14 +354,14 @@ class TestGetRealtimeData:
         mock_data_client.get_stock_latest_quote.return_value = {'AAPL': quote}
         mock_data_client.get_stock_latest_bar.return_value = {'AAPL': bar}
 
-        with patch('buffet_bot.main.data_client', mock_data_client):
+        with patch('buffet_bot.data.data_client', mock_data_client):
             result = get_realtime_data('AAPL')
 
         assert result['change_pct'] > 0
 
     def test_falls_back_to_yfinance_on_alpaca_failure(self):
         """When Alpaca raises, yfinance fast_info is used as fallback."""
-        from buffet_bot.main import get_realtime_data
+        from buffet_bot.data import get_realtime_data
 
         mock_data_client = MagicMock()
         mock_data_client.get_stock_latest_quote.side_effect = Exception("alpaca down")
@@ -376,8 +376,8 @@ class TestGetRealtimeData:
         mock_ticker = MagicMock()
         mock_ticker.fast_info = mock_fast_info
 
-        with patch('buffet_bot.main.data_client', mock_data_client):
-            with patch('buffet_bot.main.yf.Ticker', return_value=mock_ticker):
+        with patch('buffet_bot.data.data_client', mock_data_client):
+            with patch('buffet_bot.data.yf.Ticker', return_value=mock_ticker):
                 result = get_realtime_data('AAPL')
 
         assert result['price'] == 175.0
@@ -385,13 +385,13 @@ class TestGetRealtimeData:
 
     def test_returns_empty_dict_when_both_sources_fail(self):
         """Both Alpaca and yfinance fail → returns {} without raising."""
-        from buffet_bot.main import get_realtime_data
+        from buffet_bot.data import get_realtime_data
 
         mock_data_client = MagicMock()
         mock_data_client.get_stock_latest_quote.side_effect = Exception("alpaca down")
 
-        with patch('buffet_bot.main.data_client', mock_data_client):
-            with patch('buffet_bot.main.yf.Ticker', side_effect=Exception("yf down")):
+        with patch('buffet_bot.data.data_client', mock_data_client):
+            with patch('buffet_bot.data.yf.Ticker', side_effect=Exception("yf down")):
                 result = get_realtime_data('AAPL')
 
         assert isinstance(result, dict)

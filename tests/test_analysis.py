@@ -3,14 +3,9 @@ import pytest
 import pandas as pd
 import numpy as np
 
-from buffet_bot.main import (
-    _calculate_future_value,
-    _calculate_sharpe,
-    _calculate_max_drawdown,
-    _consensus_text,
-    _years_to_reach,
-    _score_color,
-)
+from buffet_bot.projections import _calculate_future_value, _years_to_reach
+from buffet_bot.backtest import _calculate_sharpe, _calculate_max_drawdown
+from buffet_bot.display import _consensus_text, _score_color
 
 
 # ── _calculate_future_value ───────────────────────────────────────────────────
