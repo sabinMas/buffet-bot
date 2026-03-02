@@ -76,9 +76,21 @@ DB_PATH     = os.path.expanduser("~/.buffet-bot.db")
 CONFIG_PATH = os.path.expanduser("~/.buffet-bot-config.toml")
 
 def _safe_plan_path(name: str) -> pathlib.Path:
-    """Return the resolved Path for a plan file, raising ValueError on path traversal."""
+    """Return the resolved Path for a plan file, raising ValueError on path traversal.
+
+    Applies two layers of defence:
+    1. Allowlist — only letters, digits, hyphens, and underscores are permitted.
+       This blocks '.', '..', slashes, and any other shell-special characters
+       before pathlib ever sees them.
+    2. Resolved-path check — confirms the final path is still inside PLANS_DIR
+       (belt-and-suspenders against any future edge cases).
+    """
+    # Layer 1: allowlist (strips hyphens/underscores then checks alphanumeric)
+    if not name or not name.replace('-', '').replace('_', '').isalnum():
+        raise ValueError(f"Invalid plan name: {name!r}")
     plans_dir = pathlib.Path(PLANS_DIR).resolve()
     target = (plans_dir / f"{name}.json").resolve()
+    # Layer 2: resolved-path confinement
     if not str(target).startswith(str(plans_dir) + os.sep):
         raise ValueError(f"Invalid plan name: {name!r}")
     return target
@@ -464,6 +476,75 @@ def get_buffett_metrics(ticker):
         console.print(f"[red]Metrics error for {ticker}: {e}[/red]")
         return {'score': 0}
 
+def get_analyst_consensus(ticker: str) -> dict:
+    """Fetch Wall Street analyst consensus and price targets via yfinance.
+
+    Returns:
+        rating_key   — normalised label: STRONG BUY / BUY / HOLD / UNDERPERFORM / SELL
+        rating_mean  — raw 1–5 score (1=strong buy, 5=strong sell)
+        target_mean  — consensus 12-month price target
+        target_low   — bear-case price target
+        target_high  — bull-case price target
+        upside_pct   — implied upside from current price to target_mean
+        num_analysts — number of analysts covering the stock
+        recent_changes — list of last 5 upgrades/downgrades
+    Returns {} on any failure (non-blocking).
+    """
+    _RATING_MAP = {
+        'strong_buy':   'STRONG BUY',
+        'buy':          'BUY',
+        'hold':         'HOLD',
+        'underperform': 'UNDERPERFORM',
+        'sell':         'SELL',
+    }
+    try:
+        t    = yf.Ticker(ticker)
+        info = t.info
+
+        target_mean   = info.get('targetMeanPrice')
+        target_low    = info.get('targetLowPrice')
+        target_high   = info.get('targetHighPrice')
+        current       = info.get('currentPrice') or info.get('regularMarketPrice')
+        num_analysts  = info.get('numberOfAnalystOpinions')
+        rating_raw    = info.get('recommendationMean')
+        rating_key_in = (info.get('recommendationKey') or '').lower().replace(' ', '_')
+        rating_key    = _RATING_MAP.get(rating_key_in, rating_key_in.upper() or 'N/A')
+
+        if not target_mean:
+            return {}
+
+        upside_pct = round((float(target_mean) - float(current)) / float(current) * 100, 1) \
+                     if target_mean and current else None
+
+        recent_changes: list[dict] = []
+        try:
+            ud = t.upgrades_downgrades
+            if ud is not None and not ud.empty:
+                for _, row in ud.head(5).iterrows():
+                    recent_changes.append({
+                        'firm':   str(row.get('Firm', '')),
+                        'from':   str(row.get('FromGrade', '')),
+                        'to':     str(row.get('ToGrade', '')),
+                        'action': str(row.get('Action', '')),
+                    })
+        except Exception:
+            pass
+
+        return {
+            'rating_key':      rating_key,
+            'rating_mean':     round(float(rating_raw), 2) if rating_raw else None,
+            'target_mean':     round(float(target_mean), 2),
+            'target_low':      round(float(target_low),  2) if target_low  else None,
+            'target_high':     round(float(target_high), 2) if target_high else None,
+            'current_price':   round(float(current),     2) if current     else None,
+            'upside_pct':      upside_pct,
+            'num_analysts':    int(num_analysts) if num_analysts else None,
+            'recent_changes':  recent_changes,
+        }
+    except Exception:
+        return {}
+
+
 def get_tech_indicators(ticker):
     """Basic RSI/MACD for high-risk"""
     data = yf.download(ticker, period='3mo', progress=False)
@@ -692,7 +773,7 @@ def _run_analysis(ticker, risk, primary_model, strategy='value'):
     def _hist_dl():
         return yf.download(ticker, period='6mo', progress=False)['Close'].tail(30)
 
-    with ThreadPoolExecutor(max_workers=8) as ex:
+    with ThreadPoolExecutor(max_workers=9) as ex:
         f_hist       = ex.submit(_hist_dl)
         f_buffett    = ex.submit(get_buffett_metrics, ticker)
         f_realtime   = ex.submit(get_realtime_data, ticker)
@@ -700,6 +781,7 @@ def _run_analysis(ticker, risk, primary_model, strategy='value'):
         f_macro      = ex.submit(_fetch_fred_data)
         f_insiders   = ex.submit(fetch_insider_transactions, ticker, 60, 5, 5)
         f_multiframe = ex.submit(get_multiframe_signals, ticker)
+        f_analyst    = ex.submit(get_analyst_consensus, ticker)
         f_tech       = ex.submit(get_tech_indicators, ticker) if risk == 'high' else None
 
     hist       = f_hist.result()
@@ -709,6 +791,7 @@ def _run_analysis(ticker, risk, primary_model, strategy='value'):
     news       = f_news.result()
     macro      = f_macro.result()
     multiframe = f_multiframe.result()
+    analyst    = f_analyst.result()
     try:
         insider_txns = f_insiders.result()
     except Exception:
@@ -767,12 +850,23 @@ def _run_analysis(ticker, risk, primary_model, strategy='value'):
             f"Price {sma_pos} 50-day SMA."
         )
 
+    analyst_block = ""
+    if analyst:
+        sign = '+' if (analyst.get('upside_pct') or 0) >= 0 else ''
+        analyst_block = (
+            f"\nWall Street Analysts ({analyst.get('num_analysts', '?')} covering): "
+            f"Consensus={analyst.get('rating_key', 'N/A')}, "
+            f"Target=${analyst.get('target_mean', 'N/A')} "
+            f"(range ${analyst.get('target_low', '?')}–${analyst.get('target_high', '?')}), "
+            f"Implied upside: {sign}{analyst.get('upside_pct', 'N/A')}%."
+        )
+
     strategy_guidance = STRATEGY_PROMPTS.get(strategy, STRATEGY_PROMPTS['value'])
 
     prompt = f"""
     Buffett Trading AI for {ticker} | Risk: {risk} | Strategy: {strategy.upper()}
     Buffett Score: {buffett['score']}/100 | ROE: {buffett.get('roe','?')}% | ROIC: {buffett.get('roic','?')}% | Debt/Eq: {buffett.get('debt_eq','?')} | OpMargin: {buffett.get('op_margin','?')}% | FCF Yield: {buffett.get('fcf_yield','?')}% | P/E: {buffett.get('pe','?')} | P/B: {buffett.get('pb','?')}
-    {live_block}{news_block}{macro_block}{insiders_block}{multiframe_block}
+    {live_block}{news_block}{macro_block}{insiders_block}{multiframe_block}{analyst_block}
     Recent Prices (30d): {hist.to_dict()}
     Tech {'(RSI: ' + str(tech.get('rsi', 'N/A')) + ', MACD: ' + str(tech.get('macd', 'N/A')) + ')' if tech else ''}
 
@@ -835,6 +929,7 @@ def _run_analysis(ticker, risk, primary_model, strategy='value'):
         'responses': responses,
         'consensus': consensus,
         'best_buy_resp': best_buy_resp,
+        'analyst': analyst,
     }
 
 def _place_order(ticker, best_resp):
@@ -942,6 +1037,48 @@ def _list_plans():
             except Exception:
                 pass
     return result
+
+# ── Plan scheduler ────────────────────────────────────────────────────────────
+
+_SCHEDULE_DAYS = {
+    'daily':    1,
+    'weekly':   7,
+    'biweekly': 14,
+    'monthly':  30,
+}
+
+def _is_plan_due(plan: dict) -> bool:
+    """Return True if this plan has a schedule and is due to run."""
+    schedule = plan.get('schedule')
+    if not schedule or schedule not in _SCHEDULE_DAYS:
+        return False
+    interval = timedelta(days=_SCHEDULE_DAYS[schedule])
+    last_run = plan.get('last_run_at')
+    if not last_run:
+        return True
+    try:
+        last_dt = datetime.fromisoformat(last_run)
+        if last_dt.tzinfo is None:
+            last_dt = last_dt.replace(tzinfo=timezone.utc)
+        return datetime.now(timezone.utc) >= last_dt + interval
+    except Exception:
+        return True
+
+def _set_plan_schedule(name: str, schedule: str | None) -> bool:
+    """Update a plan's schedule field. Returns True on success."""
+    plan = _load_plan(name)
+    if plan is None:
+        return False
+    plan['schedule'] = schedule
+    _save_plan(name, plan)
+    return True
+
+def _mark_plan_ran(name: str) -> None:
+    """Stamp last_run_at = now on a plan after a successful scheduled run."""
+    plan = _load_plan(name)
+    if plan is not None:
+        plan['last_run_at'] = datetime.now(timezone.utc).isoformat()
+        _save_plan(name, plan)
 
 def _analyze_portfolio(tickers, budget, risk, primary_model):
     """Analyze a list of tickers and print a summary table. Returns (results, buy_candidates)."""
@@ -1944,6 +2081,29 @@ def analyze(ticker, risk, dry_run, primary_model, strategy, as_json):
             title="[bold yellow]Upcoming Earnings Warning[/bold yellow]",
             border_style="yellow",
         ))
+    analyst = result.get('analyst', {})
+    if analyst:
+        upside = analyst.get('upside_pct')
+        sign   = '+' if (upside or 0) >= 0 else ''
+        u_color = 'green' if (upside or 0) >= 5 else ('red' if (upside or 0) < 0 else 'yellow')
+        rating  = analyst.get('rating_key', 'N/A')
+        r_color = ('green' if rating in ('BUY', 'STRONG BUY') else
+                   'red'   if rating in ('SELL', 'UNDERPERFORM') else 'yellow')
+        changes_str = ''
+        for ch in analyst.get('recent_changes', [])[:3]:
+            changes_str += f"\n  {ch['firm']}: {ch['from'] or '?'} → {ch['to']} ({ch['action']})"
+        console.print(Panel(
+            f"Consensus:  [{r_color}][bold]{rating}[/bold][/{r_color}]"
+            f"  [dim](mean score {analyst.get('rating_mean', '?')}/5.0, "
+            f"{analyst.get('num_analysts', '?')} analysts)[/dim]\n"
+            f"Price target: [bold]${analyst.get('target_mean', 'N/A')}[/bold]  "
+            f"[dim](low ${analyst.get('target_low', '?')} — high ${analyst.get('target_high', '?')})[/dim]\n"
+            f"Implied upside: [{u_color}][bold]{sign}{upside}%[/bold][/{u_color}]"
+            + (f"\nRecent changes:{changes_str}" if changes_str else ''),
+            title="[bold]Wall Street Analyst Consensus[/bold]",
+            border_style=r_color,
+        ))
+
     _print_ai_responses(result['responses'])
     console.print(f"\nConsensus: {_consensus_text(result['consensus'])}")
     data_src = result['realtime'].get('source', 'yfinance')

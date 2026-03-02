@@ -17,11 +17,12 @@
 | 1–5     | Engineer (v0.4.x) | complete |
 | 6       | Engineer (v0.5.0 staging) | complete |
 | 7       | Engineer (v0.5.0 features) | complete |
-| **8 →** | **Engineer (v0.5.0 finish / v1.0.0 prep)** | **next** |
+| 8       | QA + Engineer (v0.5.0 bugfix) | complete |
+| **9 →** | **Engineer (v0.5.0 finish / v1.0.0 prep)** | **next** |
 
 **Current milestone:** v0.5.0 (nearly complete — `run-plan` scheduler + analyst ratings remain)
 **Do NOT take Security Auditor** until v1.0.0 milestone is explicitly started.
-**Suggested focus for session 8:** `run-plan` scheduler, analyst consensus ratings, then cut v0.5.0 release.
+**Suggested focus for session 9:** `run-plan` scheduler (add `plan_schedules` SQLite table + `plans --schedule/--run-due`), then analyst consensus ratings, then cut v0.5.0 release.
 
 ---
 
@@ -203,6 +204,8 @@
 **Agent 3 (Software Engineer):** Implemented `scan --notify` mode (v0.5.0). Added `--notify` and `--min-score` flags to the `scan` command. Plain-text output: header, ranked table, BUY CANDIDATES list filtered by `--min-score` (default 60), cron-friendly footer. Rich spinner suppressed in notify mode. Updated ROADMAP item to `[x]`. Next focus: `run-plan` scheduler, `alerts check` command, analyst consensus ratings.
 
 **Agent 4 (Software Engineer — session 7):** Confirmed TAX_LOSS harvesting signal was already implemented (`_check_sell_signals(tlh_pct=5.0)`). Added **earnings surprise tracker**: `earnings_surprises` SQLite table (UNIQUE on ticker+date), `log_earnings_result()` / `get_earnings_history()` helpers, `beats log` / `beats show` CLI commands with beat-rate summary. Added **multi-timeframe signals**: `get_multiframe_signals()` function computing daily RSI-14, weekly RSI-14 (via resample), monthly SMA-3/SMA-12 trend, and 50-day SMA position from 1-year data; wired into `_run_analysis` concurrent fetch (max_workers 7→8); `multiframe_block` injected into LLM prompt. Remaining v0.5.0 open items: `run-plan` scheduler, analyst consensus ratings.
+
+**Agent 5 (QA + Engineer — session 8):** Ran full test suite — found 1 failure: `test_dotdot_only_blocked` in `tests/test_security.py`. Root cause: `_safe_plan_path('..')` did not raise because `'..' + '.json'` = `'...json'`, a literal filename that stays inside PLANS_DIR. Fix: added allowlist validation (only `[a-zA-Z0-9_-]`) before the pathlib check — two-layer defence. All **149 tests now pass**. Remaining open v0.5.0: `run-plan` scheduler, analyst consensus ratings.
 
 ---
 
