@@ -1,6 +1,7 @@
 """Data-fetching helpers — yfinance, Alpaca, FRED, Nasdaq earnings."""
 import json
 import requests
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
@@ -19,12 +20,16 @@ from buffet_bot.globals import (
 from buffet_bot.db import get_watchlist
 from buffet_bot.universe import _COMPANY_DB as _UNIVERSE_DB  # type: ignore
 
+# Limit concurrent yfinance requests to prevent crumb/session corruption and SQLite lock errors
+_yf_semaphore = threading.Semaphore(2)
+
 
 def get_buffett_metrics(ticker):
     """Calculate expanded Buffett value score across 6 criteria (100 pts max)."""
     try:
-        t = yf.Ticker(ticker)
-        info = t.info
+        with _yf_semaphore:
+            t = yf.Ticker(ticker)
+            info = t.info
 
         def _f(key, fallback=0.0):
             v = info.get(key)

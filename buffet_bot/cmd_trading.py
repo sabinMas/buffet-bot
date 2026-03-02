@@ -633,7 +633,7 @@ def scan(use_watchlist, top, as_json, as_notify, min_score):
     scan_ctx = (console.status("[bold blue]Scanning tickers (concurrent)...[/bold blue]")
                 if not as_json and not as_notify else contextlib.nullcontext())
     with scan_ctx:
-        with ThreadPoolExecutor(max_workers=len(tickers)) as pool:
+        with ThreadPoolExecutor(max_workers=min(len(tickers), 2)) as pool:
             futures = {pool.submit(get_buffett_metrics, t): t for t in tickers}
             for fut in as_completed(futures):
                 t = futures[fut]

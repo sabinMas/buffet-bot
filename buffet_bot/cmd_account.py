@@ -1,5 +1,6 @@
 """CLI commands: guide, plans, automate, config, alerts, watchlist, beats, completion."""
 import os
+import requests as _requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
@@ -406,6 +407,20 @@ def automate(goal, execute, budget, max_steps, primary_model, risk, strategy):
       buffet-bot automate "invest $500 in the best stock" --execute --budget 500 --risk high
       buffet-bot automate "should I sell anything?" --max-steps 5
     """
+    try:
+        _requests.get("http://localhost:11434", timeout=2)
+    except Exception:
+        console.print(Panel(
+            "[bold red]Ollama is not running.[/bold red]\n\n"
+            "Start it in a separate terminal:\n"
+            "  [cyan]ollama serve[/cyan]\n\n"
+            "Then verify models are pulled:\n"
+            "  [cyan]ollama pull deepseek-r1[/cyan]\n"
+            "  [cyan]ollama pull qwen2.5:7b[/cyan]",
+            title="[bold red]Connection Error[/bold red]",
+            border_style="red",
+        ))
+        return
     if not goal:
         console.print(Panel(
             "Let's set up your automated investing session.",
