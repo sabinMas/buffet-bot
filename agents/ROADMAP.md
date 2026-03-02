@@ -18,15 +18,27 @@
 | 6       | Engineer (v0.5.0 staging) | complete |
 | 7       | Engineer (v0.5.0 features) | complete |
 | 8       | QA + Engineer (v0.5.0 bugfix) | complete |
-| **9 →** | **Engineer (v0.5.0 finish / v1.0.0 prep)** | **next** |
+| 9       | Engineer (v0.5.0 finish) | complete |
+| **10 →**| **PM / Release Manager (v0.5.0 release)** | **next** |
 
-**Current milestone:** v0.5.0 (nearly complete — `run-plan` scheduler + analyst ratings remain)
+**Current milestone:** v0.5.0 (all Automation + Risk + Signal items `[x]`; analyst ratings deferred to backlog)
 **Do NOT take Security Auditor** until v1.0.0 milestone is explicitly started.
-**Suggested focus for session 9:** `run-plan` scheduler (add `plan_schedules` SQLite table + `plans --schedule/--run-due`), then analyst consensus ratings, then cut v0.5.0 release.
+**Suggested focus for session 10:** bump `pyproject.toml` version `0.4.1` → `0.5.0`, write `CHANGELOG.md` v0.5.0 entry, tag `v0.5.0`, then start v1.0.0 planning.
 
 ---
 
 ## Session Handoff Log
+
+### 2026-03-01 — Engineer (session 9)
+**Role taken:** Engineer (v0.5.0 finish)
+**What was done:**
+- `scan --notify` + `--min-score`: plain-text cron/email report mode for `scan`
+- `TAX_LOSS` signal in `_check_sell_signals(tlh_pct=5.0)` + `--tlh-threshold` on `check-sells`
+- `run-plan` scheduler CLI wiring: `--schedule NAME FREQ`, `--run-due` on `plans` command; Schedule + Last Run columns in `plans` list; `_is_plan_due` / `_set_plan_schedule` / `_mark_plan_ran` helpers were already in main.py
+- ROADMAP: all v0.5.0 Automation + Risk items marked `[x]`; analyst consensus ratings deferred to backlog
+**Next:** PM/Release Manager — bump version to `0.5.0`, write CHANGELOG, tag release
+
+---
 
 ### 2026-03-01 — Engineer (session 6)
 **Role taken:** Engineer (v0.5.0)
@@ -129,7 +141,7 @@
 ### Automation
 - [x] [ENG] `automate` command — ReAct agent loop: LLM chains scan/analyze/buy tools autonomously to fulfill a natural-language goal; dry-run by default, `--execute` flag for paper trades, `--budget` cap, `--max-steps` limit — complete 2026-03-01
 - [x] [ENG] Cron-compatible `scan --notify` mode: output parseable for scripts/email — complete 2026-03-01
-- [ ] [ENG] `run-plan` scheduler: execute saved plans on a schedule
+- [x] [ENG] `run-plan` scheduler: `--schedule NAME FREQ` (daily/weekly/biweekly/monthly/off), `--run-due` for cron, Schedule+Last Run columns in `plans` list; `_is_plan_due()` / `_set_plan_schedule()` / `_mark_plan_ran()` helpers — complete 2026-03-01
 - [x] [ENG] `alerts check` command: evaluate all set alerts and report — complete 2026-03-01
 
 ### Signals

@@ -2607,17 +2607,26 @@ def guide(plan, primary_model):
 
 
 @cli.command()
-@click.option('--run', 'run_plan', default=None, help='Execute a saved plan.')
-@click.option('--delete', 'delete_plan', default=None, help='Delete a saved plan.')
+@click.option('--run',          'run_plan',      default=None, help='Execute a saved plan.')
+@click.option('--delete',       'delete_plan',   default=None, help='Delete a saved plan.')
+@click.option('--schedule',     'set_schedule',  default=None,
+              type=click.Tuple([str, click.Choice(['daily', 'weekly', 'biweekly', 'monthly', 'off'])]),
+              metavar='NAME FREQ',
+              help='Attach a schedule to a plan (e.g. --schedule my-plan weekly).')
+@click.option('--run-due',      'run_due',       is_flag=True, default=False,
+              help='Run all scheduled plans that are currently due. Cron-friendly.')
 @click.option('--model', 'primary_model', default='deepseek-r1', type=click.Choice(MODELS))
-def plans(run_plan, delete_plan, primary_model):
-    """List, run, or delete saved investment plans.
+def plans(run_plan, delete_plan, set_schedule, run_due, primary_model):
+    """List, run, schedule, or delete saved investment plans.
 
     \b
     Examples:
-      buffet-bot plans                    # list all saved plans
-      buffet-bot plans --run my-plan      # re-analyze and execute a plan
-      buffet-bot plans --delete my-plan   # remove a plan
+      buffet-bot plans                              # list all saved plans
+      buffet-bot plans --run my-plan               # re-analyze and execute a plan
+      buffet-bot plans --schedule my-plan weekly   # run every 7 days
+      buffet-bot plans --schedule my-plan off      # remove schedule
+      buffet-bot plans --run-due                   # run all plans that are due (put in cron)
+      buffet-bot plans --delete my-plan            # remove a plan
     """
     if delete_plan:
         try:
@@ -2630,6 +2639,41 @@ def plans(run_plan, delete_plan, primary_model):
             console.print(f"[green]Deleted plan '{delete_plan}'.[/green]")
         else:
             console.print(f"[red]Plan '{delete_plan}' not found.[/red]")
+        return
+
+    if set_schedule:
+        plan_name, freq = set_schedule
+        new_sched = None if freq == 'off' else freq
+        if _set_plan_schedule(plan_name, new_sched):
+            if new_sched:
+                console.print(f"[green]Plan '{plan_name}' scheduled: {new_sched}.[/green]")
+                console.print(
+                    f"[dim]Cron example (daily 09:00): "
+                    f"0 9 * * * buffet-bot plans --run-due[/dim]"
+                )
+            else:
+                console.print(f"[yellow]Schedule removed from plan '{plan_name}'.[/yellow]")
+        else:
+            console.print(f"[red]Plan '{plan_name}' not found.[/red]")
+        return
+
+    if run_due:
+        all_plans = _list_plans()
+        due = [p for p in all_plans if _is_plan_due(p)]
+        if not due:
+            console.print("[dim]No scheduled plans are due right now.[/dim]")
+            return
+        console.print(f"[bold cyan]{len(due)} plan(s) due — running now...[/bold cyan]")
+        for plan_data in due:
+            name = plan_data.get('name', 'unnamed')
+            console.print(Panel(
+                f"[bold]{name}[/bold]  |  schedule: {plan_data.get('schedule')}",
+                title="Running scheduled plan",
+                border_style="cyan",
+            ))
+            _run_guide_plan(plan_data, primary_model)
+            _mark_plan_ran(name)
+            console.print(f"[green]✓ {name} complete.[/green]")
         return
 
     if run_plan:
@@ -2650,24 +2694,33 @@ def plans(run_plan, delete_plan, primary_model):
         return
 
     table = Table(title="Saved Investment Plans", box=box.ROUNDED, header_style="bold blue")
-    table.add_column("Name", style="bold cyan")
+    table.add_column("Name",     style="bold cyan")
     table.add_column("Goal")
     table.add_column("Tickers")
-    table.add_column("Budget", justify="right")
+    table.add_column("Budget",   justify="right")
     table.add_column("Risk")
-    table.add_column("Last Updated", style="dim")
+    table.add_column("Schedule", justify="center")
+    table.add_column("Last Run",  style="dim")
+    table.add_column("Updated",   style="dim")
     for p in saved:
+        sched     = p.get('schedule') or '—'
+        last_run  = (p.get('last_run_at') or '')[:10] or '—'
+        due_badge = ' [bold yellow]DUE[/bold yellow]' if _is_plan_due(p) else ''
         table.add_row(
             p.get('name', '?'),
             p.get('goal', 'custom'),
             ', '.join(p.get('tickers', [])),
             f"${p.get('budget', 0):,.2f}",
             p.get('risk', 'medium'),
+            f"{sched}{due_badge}",
+            last_run,
             (p.get('updated_at') or p.get('created_at', ''))[:10],
         )
     console.print(table)
-    console.print("\n[dim]Run a plan:    buffet-bot plans --run <name>[/dim]")
-    console.print("[dim]Delete a plan: buffet-bot plans --delete <name>[/dim]")
+    console.print("\n[dim]Run:       buffet-bot plans --run <name>[/dim]")
+    console.print("[dim]Schedule:  buffet-bot plans --schedule <name> daily|weekly|biweekly|monthly[/dim]")
+    console.print("[dim]Run due:   buffet-bot plans --run-due  (put this in cron)[/dim]")
+    console.print("[dim]Delete:    buffet-bot plans --delete <name>[/dim]")
 
 
 # ── Automate ──────────────────────────────────────────────────────────────────
