@@ -16,10 +16,12 @@
 |---------|------|--------|
 | 1–5     | Engineer (v0.4.x) | complete |
 | 6       | Engineer (v0.5.0 staging) | complete |
-| **7 →** | **Engineer (v0.5.0 features)** | **next** |
+| 7       | Engineer (v0.5.0 features) | complete |
+| **8 →** | **Engineer (v0.5.0 finish / v1.0.0 prep)** | **next** |
 
-**Current milestone:** v0.5.0
-**Do NOT take Security Auditor** until v1.0.0 milestone is started.
+**Current milestone:** v0.5.0 (nearly complete — `run-plan` scheduler + analyst ratings remain)
+**Do NOT take Security Auditor** until v1.0.0 milestone is explicitly started.
+**Suggested focus for session 8:** `run-plan` scheduler, analyst consensus ratings, then cut v0.5.0 release.
 
 ---
 
@@ -42,10 +44,13 @@
 - Concurrent FRED + data fetch in `_run_analysis()` + `_fetch_fred_data()`
 - Beta-adjusted position sizing (`get_buffett_metrics` returns beta; `_calculate_position_size` scales by beta)
 - Portfolio VaR: `_calculate_portfolio_var()` + `buffet-bot var` command
+- `scan --notify` + `--min-score` — plain-text cron/email report mode
+- Simulated tax-loss harvesting — `TAX_LOSS` signal in `_check_sell_signals(tlh_pct=5.0)`, `--tlh-threshold` flag on `check-sells`, disclaimer footnote
 **Known issues / notes:**
 - `tests/` are staged but have not been run in CI — QA agent should verify pass rate
 - `pyproject.toml` had `[project.optional-dependencies]` added in a prior session but version not bumped — now fixed
 - `alerts check` was implemented but ROADMAP showed `[ ]` — now corrected
+- All v0.5.0 Risk items are now complete (`[x]`); remaining open: Signals (3 items) and Performance (2 items)
 
 ---
 
@@ -128,8 +133,8 @@
 
 ### Signals
 - [ ] [SCRAPER+ENG] Analyst consensus ratings (Nasdaq API or similar)
-- [ ] [ENG] Multi-timeframe analysis: 1d, 1w, 1mo signals combined
-- [ ] [ENG] Earnings surprise tracker: log beat/miss history in SQLite
+- [x] [ENG] Multi-timeframe analysis: 1d, 1w, 1mo signals combined — `get_multiframe_signals()` (daily/weekly RSI-14, monthly SMA trend, 50-day SMA position) wired into `_run_analysis` concurrent fetch (max_workers 8); `multiframe_block` injected into LLM prompt — complete 2026-03-01
+- [x] [ENG] Earnings surprise tracker: log beat/miss history in SQLite — `earnings_surprises` table, `log_earnings_result()`, `get_earnings_history()`; `beats log` / `beats show` CLI commands — complete 2026-03-01
 
 ### Performance
 - [ ] [PERF] Resolve async LLM query open question — ThreadPoolExecutor vs asyncio ADR
@@ -139,7 +144,7 @@
 ### Risk
 - [x] [ENG] Beta-adjusted position sizing — `get_buffett_metrics()` now returns `beta`; `_calculate_position_size()` accepts `beta` param and scales position down by `max(1.0, beta)` — complete 2026-03-01
 - [x] [ENG] Portfolio VaR (Value at Risk) calculation — `_calculate_portfolio_var()` historical simulation (95%/99%); new `var` command — complete 2026-03-01
-- [ ] [ENG] Simulated tax-loss harvesting signal in `check-sells`
+- [x] [ENG] Simulated tax-loss harvesting signal in `check-sells` — `TAX_LOSS` signal added to `_check_sell_signals(tlh_pct=5.0)`; `--tlh-threshold` flag on `check-sells`; disclaimer footnote — complete 2026-03-01
 
 ---
 
@@ -196,6 +201,8 @@
 **Agent 2 (Security Auditor):** Audited all six security categories (credentials, SQL, shell injection, input validation, data exfiltration, XML). Found and documented FINDING-001 (path traversal, P1 — already fixed by Agent 1) and FINDING-002 (XML entity expansion, P3 — informational). Closed the residual gap where `_load_plan()` did not catch `ValueError` from `_safe_plan_path`. Wrote `agents/SECURITY-AUDIT.md`. Marked 4 of 5 v1.0.0 security checklist items complete. Remaining: `pip-audit` dependency CVE scan.
 
 **Agent 3 (Software Engineer):** Implemented `scan --notify` mode (v0.5.0). Added `--notify` and `--min-score` flags to the `scan` command. Plain-text output: header, ranked table, BUY CANDIDATES list filtered by `--min-score` (default 60), cron-friendly footer. Rich spinner suppressed in notify mode. Updated ROADMAP item to `[x]`. Next focus: `run-plan` scheduler, `alerts check` command, analyst consensus ratings.
+
+**Agent 4 (Software Engineer — session 7):** Confirmed TAX_LOSS harvesting signal was already implemented (`_check_sell_signals(tlh_pct=5.0)`). Added **earnings surprise tracker**: `earnings_surprises` SQLite table (UNIQUE on ticker+date), `log_earnings_result()` / `get_earnings_history()` helpers, `beats log` / `beats show` CLI commands with beat-rate summary. Added **multi-timeframe signals**: `get_multiframe_signals()` function computing daily RSI-14, weekly RSI-14 (via resample), monthly SMA-3/SMA-12 trend, and 50-day SMA position from 1-year data; wired into `_run_analysis` concurrent fetch (max_workers 7→8); `multiframe_block` injected into LLM prompt. Remaining v0.5.0 open items: `run-plan` scheduler, analyst consensus ratings.
 
 ---
 

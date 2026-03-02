@@ -198,6 +198,17 @@ def init_db():
             created_at TEXT    NOT NULL,
             triggered  INTEGER NOT NULL DEFAULT 0
         );
+        CREATE TABLE IF NOT EXISTS earnings_surprises (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker        TEXT    NOT NULL,
+            report_date   TEXT    NOT NULL,
+            eps_actual    REAL    NOT NULL,
+            eps_forecast  REAL    NOT NULL,
+            surprise_pct  REAL    NOT NULL,
+            beat_miss     TEXT    NOT NULL,
+            logged_at     TEXT    NOT NULL,
+            UNIQUE(ticker, report_date)
+        );
     """)
     conn.commit()
     conn.close()
@@ -327,6 +338,64 @@ def mark_alert_triggered(alert_id):
         conn.close()
     except Exception:
         pass
+
+def log_earnings_result(ticker: str, report_date: str,
+                        eps_actual: float, eps_forecast: float) -> bool:
+    """Record an earnings result. Returns True on insert, False on duplicate/error."""
+    try:
+        surprise_pct = ((eps_actual - eps_forecast) / abs(eps_forecast) * 100
+                        if eps_forecast != 0 else 0.0)
+        if surprise_pct >= 3:
+            beat_miss = 'BEAT'
+        elif surprise_pct <= -3:
+            beat_miss = 'MISS'
+        else:
+            beat_miss = 'IN-LINE'
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute(
+            """INSERT OR IGNORE INTO earnings_surprises
+               (ticker, report_date, eps_actual, eps_forecast,
+                surprise_pct, beat_miss, logged_at)
+               VALUES (?,?,?,?,?,?,?)""",
+            (ticker.upper(), report_date,
+             round(float(eps_actual), 4), round(float(eps_forecast), 4),
+             round(surprise_pct, 2), beat_miss,
+             datetime.now(timezone.utc).isoformat()),
+        )
+        inserted = conn.execute("SELECT changes()").fetchone()[0]
+        conn.commit()
+        conn.close()
+        return bool(inserted)
+    except Exception:
+        return False
+
+def get_earnings_history(ticker: str = '', limit: int = 20) -> list[dict]:
+    """Return recent earnings_surprises rows. Pass ticker='' for all tickers."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        if ticker:
+            rows = conn.execute(
+                """SELECT ticker, report_date, eps_actual, eps_forecast,
+                          surprise_pct, beat_miss
+                   FROM earnings_surprises
+                   WHERE ticker = ?
+                   ORDER BY report_date DESC LIMIT ?""",
+                (ticker.upper(), limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT ticker, report_date, eps_actual, eps_forecast,
+                          surprise_pct, beat_miss
+                   FROM earnings_surprises
+                   ORDER BY report_date DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        conn.close()
+        cols = ['ticker', 'report_date', 'eps_actual', 'eps_forecast',
+                'surprise_pct', 'beat_miss']
+        return [dict(zip(cols, r)) for r in rows]
+    except Exception:
+        return []
 
 init_db()
 
@@ -623,21 +692,23 @@ def _run_analysis(ticker, risk, primary_model, strategy='value'):
     def _hist_dl():
         return yf.download(ticker, period='6mo', progress=False)['Close'].tail(30)
 
-    with ThreadPoolExecutor(max_workers=7) as ex:
-        f_hist     = ex.submit(_hist_dl)
-        f_buffett  = ex.submit(get_buffett_metrics, ticker)
-        f_realtime = ex.submit(get_realtime_data, ticker)
-        f_news     = ex.submit(get_recent_news, ticker)
-        f_macro    = ex.submit(_fetch_fred_data)
-        f_insiders = ex.submit(fetch_insider_transactions, ticker, 60, 5, 5)
-        f_tech     = ex.submit(get_tech_indicators, ticker) if risk == 'high' else None
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        f_hist       = ex.submit(_hist_dl)
+        f_buffett    = ex.submit(get_buffett_metrics, ticker)
+        f_realtime   = ex.submit(get_realtime_data, ticker)
+        f_news       = ex.submit(get_recent_news, ticker)
+        f_macro      = ex.submit(_fetch_fred_data)
+        f_insiders   = ex.submit(fetch_insider_transactions, ticker, 60, 5, 5)
+        f_multiframe = ex.submit(get_multiframe_signals, ticker)
+        f_tech       = ex.submit(get_tech_indicators, ticker) if risk == 'high' else None
 
-    hist     = f_hist.result()
-    buffett  = f_buffett.result()
-    tech     = f_tech.result() if f_tech else {}
-    realtime = f_realtime.result()
-    news     = f_news.result()
-    macro    = f_macro.result()
+    hist       = f_hist.result()
+    buffett    = f_buffett.result()
+    tech       = f_tech.result() if f_tech else {}
+    realtime   = f_realtime.result()
+    news       = f_news.result()
+    macro      = f_macro.result()
+    multiframe = f_multiframe.result()
     try:
         insider_txns = f_insiders.result()
     except Exception:
@@ -684,12 +755,24 @@ def _run_analysis(ticker, risk, primary_model, strategy='value'):
 
     insiders_block = insider_prompt_block(insider_txns)
 
+    multiframe_block = ""
+    if multiframe:
+        sma_pos = ('above' if multiframe.get('above_sma50') else
+                   'below' if multiframe.get('above_sma50') is False else 'N/A')
+        multiframe_block = (
+            f"\nMulti-Timeframe Signals: "
+            f"RSI(1d)={multiframe.get('rsi_1d', 'N/A')}, "
+            f"RSI(1w)={multiframe.get('rsi_1w', 'N/A')}, "
+            f"Monthly trend={multiframe.get('trend_1mo', 'N/A')}, "
+            f"Price {sma_pos} 50-day SMA."
+        )
+
     strategy_guidance = STRATEGY_PROMPTS.get(strategy, STRATEGY_PROMPTS['value'])
 
     prompt = f"""
     Buffett Trading AI for {ticker} | Risk: {risk} | Strategy: {strategy.upper()}
     Buffett Score: {buffett['score']}/100 | ROE: {buffett.get('roe','?')}% | ROIC: {buffett.get('roic','?')}% | Debt/Eq: {buffett.get('debt_eq','?')} | OpMargin: {buffett.get('op_margin','?')}% | FCF Yield: {buffett.get('fcf_yield','?')}% | P/E: {buffett.get('pe','?')} | P/B: {buffett.get('pb','?')}
-    {live_block}{news_block}{macro_block}{insiders_block}
+    {live_block}{news_block}{macro_block}{insiders_block}{multiframe_block}
     Recent Prices (30d): {hist.to_dict()}
     Tech {'(RSI: ' + str(tech.get('rsi', 'N/A')) + ', MACD: ' + str(tech.get('macd', 'N/A')) + ')' if tech else ''}
 
@@ -1329,8 +1412,17 @@ def _calculate_portfolio_var(positions, confidence=0.95, lookback_days=252):
         return None
 
 
-def _check_sell_signals(pos_list):
+def _check_sell_signals(pos_list, tlh_pct=5.0):
     """Check each position for sell signals.
+
+    Signal types:
+      STOP          — price dropped ≥7% from entry (hard stop-loss)
+      THESIS_BROKEN — Buffett score fell below 40
+      UNDERPERFORM  — P&L in bottom 20% of portfolio (relative underperformer)
+      OVERBOUGHT    — RSI > 72 (mean-reversion risk)
+      TAX_LOSS      — unrealised loss ≥ tlh_pct% and no harder STOP already firing
+                      (simulated tax-loss harvesting candidate; consult a tax advisor)
+
     Returns list of (pos, signals_list, b_score, rsi_val) 4-tuples.
     """
     n = len(pos_list)
@@ -1354,6 +1446,8 @@ def _check_sell_signals(pos_list):
         except Exception:
             entry = current = 0.0
 
+        pnl_pct = pnl_pcts[i]
+
         if entry and current < entry * 0.93:
             signals.append('STOP')
 
@@ -1361,7 +1455,7 @@ def _check_sell_signals(pos_list):
         if b_score < 40:
             signals.append('THESIS_BROKEN')
 
-        if pnl_threshold is not None and pnl_pcts[i] <= pnl_threshold:
+        if pnl_threshold is not None and pnl_pct <= pnl_threshold:
             signals.append('UNDERPERFORM')
 
         rsi_val = None
@@ -1372,6 +1466,11 @@ def _check_sell_signals(pos_list):
                 signals.append('OVERBOUGHT')
         except Exception:
             pass
+
+        # TAX_LOSS: flag a meaningful unrealised loss that hasn't already hit the
+        # harder STOP threshold — surfaces as a harvest candidate for review.
+        if 'STOP' not in signals and pnl_pct < -abs(tlh_pct):
+            signals.append('TAX_LOSS')
 
         results.append((pos, signals, b_score, rsi_val))
     return results
@@ -1407,6 +1506,57 @@ def _compute_rsi(series, period=14):
     loss  = (-delta.where(delta < 0, 0.0)).rolling(period).mean()
     rs    = gain / loss
     return 100 - (100 / (1 + rs))
+
+
+def get_multiframe_signals(ticker: str) -> dict:
+    """Daily / weekly / monthly technical signals from 1-year price history.
+
+    Returns:
+        rsi_1d   — 14-day RSI on daily close
+        rsi_1w   — 14-week RSI on weekly close (None if insufficient data)
+        trend_1mo — 'UP'|'DOWN' based on SMA-3 vs SMA-12 on monthly close
+        above_sma50 — bool, whether today's price is above the 50-day SMA
+    """
+    try:
+        df = yf.download(ticker, period='1y', progress=False, auto_adjust=True)
+        if df.empty or len(df) < 20:
+            return {}
+        close = df['Close']
+        if isinstance(close, pd.DataFrame):
+            close = close.iloc[:, 0]
+        close = close.dropna()
+
+        # Daily RSI
+        rsi_1d = round(float(_compute_rsi(close).iloc[-1]), 1)
+
+        # Weekly RSI — resample to weekly, need ≥15 weeks
+        close_w = close.resample('W').last().dropna()
+        rsi_1w: float | None = None
+        if len(close_w) >= 15:
+            rsi_1w = round(float(_compute_rsi(close_w).iloc[-1]), 1)
+
+        # Monthly trend: 3-month SMA vs 12-month SMA on monthly close
+        close_m = close.resample('ME').last().dropna()
+        trend_1mo: str | None = None
+        if len(close_m) >= 3:
+            n_long    = min(12, len(close_m))
+            sma3_m    = float(close_m.rolling(3).mean().iloc[-1])
+            sma_long  = float(close_m.rolling(n_long).mean().iloc[-1])
+            trend_1mo = 'UP' if sma3_m > sma_long else 'DOWN'
+
+        # 50-day SMA vs current price
+        sma50_val   = close.rolling(50).mean().iloc[-1]
+        above_sma50 = bool(float(close.iloc[-1]) > float(sma50_val)) \
+                      if not np.isnan(sma50_val) else None
+
+        return {
+            'rsi_1d':      rsi_1d,
+            'rsi_1w':      rsi_1w,
+            'trend_1mo':   trend_1mo,
+            'above_sma50': above_sma50,
+        }
+    except Exception:
+        return {}
 
 
 def _calculate_sharpe(daily_returns, risk_free_annual=0.05):
@@ -2248,7 +2398,11 @@ def guide(plan, primary_model):
     """
     # If a plan name is passed directly, skip the menu
     if plan:
-        plan_data = _load_plan(plan)
+        try:
+            plan_data = _load_plan(plan)
+        except ValueError:
+            console.print(f"[red]Invalid plan name: {plan!r}[/red]")
+            return
         if not plan_data:
             console.print(f"[red]Plan '{plan}' not found. Run 'buffet-bot plans' to list saved plans.[/red]")
             return
@@ -3072,7 +3226,9 @@ def correlate():
 @cli.command('check-sells')
 @click.option('--execute', is_flag=True, default=False,
               help='Sell positions flagged STOP or THESIS_BROKEN.')
-def check_sells(execute):
+@click.option('--tlh-threshold', 'tlh_pct', default=5.0, show_default=True, type=float,
+              help='Minimum loss % to flag a TAX_LOSS harvest candidate (default 5.0).')
+def check_sells(execute, tlh_pct):
     """Check open positions for sell signals: buffet-bot check-sells [--execute]"""
     try:
         positions = trading_client.get_all_positions()
@@ -3086,7 +3242,7 @@ def check_sells(execute):
 
     console.print(f"[dim]Checking {len(positions)} position(s) for sell signals...[/dim]")
     with console.status("[bold blue]Analyzing signals...[/bold blue]"):
-        results = _check_sell_signals(positions)
+        results = _check_sell_signals(positions, tlh_pct=tlh_pct)
 
     tbl = Table(title="Sell Signal Analysis", box=box.ROUNDED, header_style="bold blue")
     tbl.add_column("Ticker",  style="bold cyan")
@@ -3131,6 +3287,14 @@ def check_sells(execute):
         )
 
     console.print(tbl)
+
+    has_tlh = any('TAX_LOSS' in sigs for _, sigs, _, _ in results)
+    if has_tlh:
+        console.print(
+            f"[dim]⚠  TAX_LOSS candidates flagged at ≥{tlh_pct:.0f}% unrealised loss. "
+            "This is a simulated signal only — consult a qualified tax advisor before "
+            "harvesting losses.[/dim]"
+        )
 
     if execute and sell_flagged:
         console.print(f"\n[bold red]Selling: {', '.join(p.symbol for p in sell_flagged)}[/bold red]")
@@ -4047,6 +4211,108 @@ def completion(shell):
         title="[bold]Shell Completion Setup[/bold]",
         border_style="cyan",
     ))
+
+
+@cli.group()
+def beats():
+    """Log and review earnings beat/miss history."""
+    pass
+
+
+@beats.command('log')
+@click.argument('ticker', shell_complete=_complete_ticker)
+@click.option('--eps-actual',   required=True, type=float, help='Reported EPS.')
+@click.option('--eps-forecast', required=True, type=float, help='Analyst consensus EPS forecast.')
+@click.option('--date', 'report_date', default=None,
+              help='Report date YYYY-MM-DD (defaults to today).')
+def beats_log(ticker, eps_actual, eps_forecast, report_date):
+    """Record an earnings result against the analyst forecast.
+
+    \b
+    Examples:
+      buffet-bot beats log AAPL --eps-actual 2.18 --eps-forecast 2.10
+      buffet-bot beats log MSFT --eps-actual 3.05 --eps-forecast 3.20 --date 2026-01-29
+    """
+    ticker = ticker.upper()
+    if report_date is None:
+        report_date = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    inserted = log_earnings_result(ticker, report_date, eps_actual, eps_forecast)
+    if not inserted:
+        console.print(f"[yellow]Duplicate entry: {ticker} on {report_date} already logged.[/yellow]")
+        return
+    surprise_pct = ((eps_actual - eps_forecast) / abs(eps_forecast) * 100
+                    if eps_forecast != 0 else 0.0)
+    sign   = '+' if surprise_pct >= 0 else ''
+    color  = 'green' if surprise_pct >= 3 else ('red' if surprise_pct <= -3 else 'yellow')
+    label  = 'BEAT' if surprise_pct >= 3 else ('MISS' if surprise_pct <= -3 else 'IN-LINE')
+    console.print(Panel(
+        f"Ticker:    [bold cyan]{ticker}[/bold cyan]\n"
+        f"Date:      {report_date}\n"
+        f"Actual:    ${eps_actual:.4f}\n"
+        f"Forecast:  ${eps_forecast:.4f}\n"
+        f"Surprise:  [{color}][bold]{sign}{surprise_pct:.1f}%  {label}[/bold][/{color}]",
+        title="[bold]Earnings Result Logged[/bold]",
+        border_style=color,
+    ))
+
+
+@beats.command('show')
+@click.argument('ticker', default='', required=False, shell_complete=_complete_ticker)
+@click.option('--limit', default=20, show_default=True, type=int,
+              help='Max rows to show.')
+def beats_show(ticker, limit):
+    """Display earnings beat/miss history.
+
+    \b
+    Examples:
+      buffet-bot beats show          # all tickers, most recent first
+      buffet-bot beats show AAPL     # just Apple
+      buffet-bot beats show AAPL --limit 8
+    """
+    rows = get_earnings_history(ticker, limit)
+    if not rows:
+        msg = f"No earnings history for [bold]{ticker.upper()}[/bold]." if ticker \
+              else "No earnings history logged yet. Use: buffet-bot beats log TICKER --eps-actual X --eps-forecast Y"
+        console.print(f"[yellow]{msg}[/yellow]")
+        return
+
+    tbl = Table(
+        title=f"Earnings Surprise History — {ticker.upper() or 'All Tickers'}",
+        box=box.ROUNDED, header_style="bold blue",
+    )
+    tbl.add_column("Ticker",   style="bold cyan",  no_wrap=True)
+    tbl.add_column("Date",     style="dim",         no_wrap=True)
+    tbl.add_column("Actual",   justify="right")
+    tbl.add_column("Forecast", justify="right")
+    tbl.add_column("Surprise", justify="right")
+    tbl.add_column("Result",   justify="center")
+
+    beat_count = miss_count = inline_count = 0
+    for r in rows:
+        bm = r['beat_miss']
+        color = 'green' if bm == 'BEAT' else ('red' if bm == 'MISS' else 'yellow')
+        sign  = '+' if r['surprise_pct'] >= 0 else ''
+        tbl.add_row(
+            r['ticker'],
+            r['report_date'],
+            f"${r['eps_actual']:.4f}",
+            f"${r['eps_forecast']:.4f}",
+            f"[{color}]{sign}{r['surprise_pct']:.1f}%[/{color}]",
+            f"[{color}][bold]{bm}[/bold][/{color}]",
+        )
+        if bm == 'BEAT':    beat_count  += 1
+        elif bm == 'MISS':  miss_count  += 1
+        else:               inline_count += 1
+
+    console.print(tbl)
+    total = beat_count + miss_count + inline_count
+    beat_rate = beat_count / total * 100 if total else 0
+    console.print(
+        f"  [green]Beats: {beat_count}[/green]  "
+        f"[red]Misses: {miss_count}[/red]  "
+        f"[yellow]In-line: {inline_count}[/yellow]  "
+        f"[dim]Beat rate: {beat_rate:.0f}%[/dim]"
+    )
 
 
 def main():
