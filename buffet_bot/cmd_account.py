@@ -14,6 +14,7 @@ from buffet_bot.globals import (
     console, MODELS, PLANS_DIR, CONFIG_PATH,
     _CONFIG_DEFAULTS, _load_config, trading_client,
 )
+from buffet_bot.display import _make_panel_title
 try:
     import tomli_w
 except ImportError:
@@ -68,20 +69,20 @@ def guide(plan, primary_model):
 
     account = trading_client.get_account()
     console.print(Panel(
-        f"[bold green]Buffett Investment Guide[/bold green]\n\n"
-        f"Account  Cash [bold]${float(account.cash):,.2f}[/bold]  |  "
-        f"Buying Power [bold]${float(account.buying_power):,.2f}[/bold]\n\n"
+        f"[bold bright_green]Buffett Investment Guide[/bold bright_green]\n\n"
+        f"Account  Cash [bold bright_white]${float(account.cash):,.2f}[/bold bright_white]  |  "
+        f"Buying Power [bold bright_white]${float(account.buying_power):,.2f}[/bold bright_white]\n\n"
         "[dim]Walk through analyzing stocks, build a multi-stock strategy,\n"
         "save recurring investment plans, and execute paper trades.[/dim]",
-        border_style="blue",
+        border_style="bright_green", box=box.ROUNDED,
     ))
 
     while True:
-        console.print("\n[bold]What would you like to do?[/bold]")
-        console.print("  [bold cyan]1[/bold cyan]  Analyze a single stock and optionally buy")
-        console.print("  [bold cyan]2[/bold cyan]  Build a multi-stock investment plan")
-        console.print("  [bold cyan]3[/bold cyan]  Load and run a saved investment plan")
-        console.print("  [bold cyan]q[/bold cyan]  Quit\n")
+        console.print("\n[bold bright_cyan]What would you like to do?[/bold bright_cyan]")
+        console.print("  [bold bright_cyan]1[/bold bright_cyan]  Analyze a single stock and optionally buy")
+        console.print("  [bold bright_cyan]2[/bold bright_cyan]  Build a multi-stock investment plan")
+        console.print("  [bold bright_cyan]3[/bold bright_cyan]  Load and run a saved investment plan")
+        console.print("  [bold bright_cyan]q[/bold bright_cyan]  Quit\n")
 
         try:
             choice = Prompt.ask("[bold]Choice[/bold]", choices=['1', '2', '3', 'q'], default='1')
@@ -131,13 +132,13 @@ def plans(run_plan, delete_plan, set_schedule, run_due, primary_model):
         try:
             path = _safe_plan_path(delete_plan)
         except ValueError:
-            console.print(f"[red]Invalid plan name: {delete_plan!r}[/red]")
+            console.print(f"[bright_red]Invalid plan name: {delete_plan!r}[/bright_red]")
             return
         if path.exists():
             path.unlink()
-            console.print(f"[green]Deleted plan '{delete_plan}'.[/green]")
+            console.print(f"[bright_green]Deleted plan '{delete_plan}'.[/bright_green]")
         else:
-            console.print(f"[red]Plan '{delete_plan}' not found.[/red]")
+            console.print(f"[bright_red]Plan '{delete_plan}' not found.[/bright_red]")
         return
 
     if set_schedule:
@@ -145,7 +146,7 @@ def plans(run_plan, delete_plan, set_schedule, run_due, primary_model):
         new_sched = None if freq == 'off' else freq
         if _set_plan_schedule(plan_name, new_sched):
             if new_sched:
-                console.print(f"[green]Plan '{plan_name}' scheduled: {new_sched}.[/green]")
+                console.print(f"[bright_green]Plan '{plan_name}' scheduled: {new_sched}.[/bright_green]")
                 console.print(
                     f"[dim]Cron example (daily 09:00): "
                     f"0 9 * * * buffet-bot plans --run-due[/dim]"

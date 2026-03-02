@@ -16,7 +16,7 @@ from buffet_bot.crypto import CRYPTO_SYMBOLS
 from buffet_bot.data import (
     get_recent_news, get_realtime_data, get_tech_indicators, _complete_ticker,
 )
-from buffet_bot.display import _print_live_market
+from buffet_bot.display import _print_live_market, _make_panel_title
 from buffet_bot.politicians import (
     fetch_house_trades, fetch_fmp_trades, merge_deduplicate, display_politician_trades,
 )
@@ -39,8 +39,8 @@ def news(ticker, days, primary_model):
     """News + congressional trade intelligence: buffet-bot news AAPL --days 60"""
     ticker = ticker.upper()
     console.print(Panel(
-        f"[bold]{ticker}[/bold]  |  Congressional trade window: [cyan]{days}d[/cyan]",
-        title="News & Politician Intelligence", border_style="blue",
+        f"[bold bright_white]{ticker}[/bold bright_white]  |  Congressional trade window: [bright_cyan]{days}d[/bright_cyan]",
+        title=_make_panel_title("News & Politician Intelligence", "bright_cyan"), border_style="bright_cyan", box=box.ROUNDED,
     ))
 
     # 1) Alpaca news headlines (reuse existing helper)
@@ -56,18 +56,18 @@ def news(ticker, days, primary_model):
         shares_short = info.get("sharesShort")
 
         rows = []
-        if beta       is not None: rows.append(f"Beta:               [yellow]{beta:.2f}[/yellow]")
-        if short_pct  is not None: rows.append(f"Short % of Float:   [yellow]{short_pct*100:.1f}%[/yellow]")
-        if short_ratio is not None: rows.append(f"Short Ratio (days): [yellow]{short_ratio:.1f}[/yellow]")
-        if shares_short is not None: rows.append(f"Shares Short:       [dim]{shares_short:,}[/dim]")
+        if beta       is not None: rows.append(f"Beta:               [bright_yellow]{beta:.2f}[/bright_yellow]")
+        if short_pct  is not None: rows.append(f"Short % of Float:   [bright_yellow]{short_pct*100:.1f}%[/bright_yellow]")
+        if short_ratio is not None: rows.append(f"Short Ratio (days): [bright_yellow]{short_ratio:.1f}[/bright_yellow]")
+        if shares_short is not None: rows.append(f"Shares Short:       [dim bright_white]{shares_short:,}[/dim bright_white]")
 
         if rows:
-            console.print(Panel("\n".join(rows), title="Short Interest & Beta", border_style="dim"))
+            console.print(Panel("\n".join(rows), title=_make_panel_title("Short Interest & Beta", "bright_yellow"), border_style="bright_yellow", box=box.ROUNDED))
     except Exception:
         pass
 
     # 3) Congressional trades (House Stock Watcher + FMP merged)
-    console.print(f"\n[bold]Congressional Trades — last {days} days[/bold]")
+    console.print(f"\n[bold bright_cyan]Congressional Trades — last {days} days[/bold bright_cyan]")
     with console.status("[dim]Fetching congressional data...[/dim]"):
         house_trades = fetch_house_trades(ticker=ticker, days=days)
         fmp_trades   = fetch_fmp_trades(ticker=ticker)
@@ -109,11 +109,15 @@ def news(ticker, days, primary_model):
                     options={"temperature": 0.4},
                 )
                 summary = resp["message"]["content"].strip()
-                color = MODEL_COLORS.get(primary_model, "white")
+                color = MODEL_COLORS.get(primary_model, "bright_cyan")
+                if color == 'cyan':
+                    color = 'bright_cyan'
+                elif color == 'magenta':
+                    color = 'bright_magenta'
                 console.print(Panel(
                     summary,
-                    title=f"[bold {color}]AI Sentiment Summary ({primary_model})[/bold {color}]",
-                    border_style=color,
+                    title=_make_panel_title(f"AI Sentiment Summary ({primary_model})", color),
+                    border_style=color, box=box.ROUNDED,
                 ))
             except Exception as e:
                 console.print(f"[dim]AI summary unavailable: {e}[/dim]")
@@ -129,10 +133,10 @@ def insiders(ticker, days, limit):
     """SEC Form 4 insider trades for a stock: buffet-bot insiders AAPL"""
     ticker = ticker.upper()
     console.print(Panel(
-        f"[bold]{ticker}[/bold]  |  Window: [cyan]{days}d[/cyan]  |  "
-        f"Max rows: [cyan]{limit}[/cyan]",
-        title="SEC EDGAR Form 4 — Insider Transactions",
-        border_style="blue",
+        f"[bold bright_white]{ticker}[/bold bright_white]  |  Window: [bright_cyan]{days}d[/bright_cyan]  |  "
+        f"Max rows: [bright_cyan]{limit}[/bright_cyan]",
+        title=_make_panel_title("SEC EDGAR Form 4 — Insider Transactions", "bright_cyan"),
+        border_style="bright_cyan", box=box.ROUNDED,
     ))
     with console.status(
         f"[dim]Fetching SEC EDGAR Form 4 filings for {ticker}...[/dim]",
