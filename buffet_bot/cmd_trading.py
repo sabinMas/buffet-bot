@@ -453,23 +453,23 @@ def history(limit, ticker, order_status):
     try:
         orders = trading_client.get_orders(filter=request)
     except Exception as e:
-        console.print(f"[red]Error fetching orders: {e}[/red]")
+        console.print(f"[bright_red]Error fetching orders: {e}[/bright_red]")
         return
 
     if not orders:
-        console.print("[yellow]No orders found.[/yellow]")
+        console.print("[bright_yellow]No orders found.[/bright_yellow]")
         return
 
-    table = Table(title="Trade History", box=box.ROUNDED, header_style="bold blue")
-    table.add_column("Date", style="dim")
-    table.add_column("Symbol", style="bold cyan")
-    table.add_column("Side")
-    table.add_column("Qty")
-    table.add_column("Fill Price")
-    table.add_column("Status")
+    table = Table(title=f"[bold bright_cyan]Trade History[/bold bright_cyan]", box=box.ROUNDED, header_style="bold bright_cyan")
+    table.add_column("Date", style="dim bright_white")
+    table.add_column("Symbol", style="bold bright_cyan")
+    table.add_column("Side", style="bright_white")
+    table.add_column("Qty", style="bright_white")
+    table.add_column("Fill Price", style="bright_white")
+    table.add_column("Status", style="bright_white")
 
     for o in orders:
-        side_color = "green" if o.side == OrderSide.BUY else "red"
+        side_color = "bright_green" if o.side == OrderSide.BUY else "bright_red"
         table.add_row(
             str(o.submitted_at)[:19] if o.submitted_at else '',
             o.symbol,
@@ -501,25 +501,25 @@ def portfolio(period):
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:
-        console.print(f"[red]Error fetching portfolio history: {e}[/red]")
+        console.print(f"[bright_red]Error fetching portfolio history: {e}[/bright_red]")
         return
 
     timestamps = data.get('timestamp', [])
     equity = data.get('equity', [])
 
     if not timestamps or not equity:
-        console.print("[yellow]No portfolio history available yet.[/yellow]")
+        console.print("[bright_yellow]No portfolio history available yet.[/bright_yellow]")
         return
 
     dates = [datetime.fromtimestamp(ts, tz=timezone.utc).strftime('%Y-%m-%d') for ts in timestamps]
     pairs = [(d, e) for d, e in zip(dates, equity) if e is not None]
     if not pairs:
-        console.print("[yellow]No equity data points to display.[/yellow]")
+        console.print("[bright_yellow]No equity data points to display.[/bright_yellow]")
         return
     dates, equity = zip(*pairs)
 
     pnl = float(equity[-1]) - float(equity[0])
-    pnl_color = "green" if pnl >= 0 else "red"
+    pnl_color = "bright_green" if pnl >= 0 else "bright_red"
     pnl_sign = "+" if pnl >= 0 else ""
 
     try:
@@ -530,11 +530,11 @@ def portfolio(period):
         plt.ylabel("USD")
         plt.show()
     except Exception as e:
-        console.print(f"[red]Chart error: {e}[/red]")
+        console.print(f"[bright_red]Chart error: {e}[/bright_red]")
 
     console.print(
-        f"\nStart: [bold]${float(equity[0]):,.2f}[/bold]  "
-        f"Current: [bold]${float(equity[-1]):,.2f}[/bold]  "
+        f"\nStart: [bold bright_white]${float(equity[0]):,.2f}[/bold bright_white]  "
+        f"Current: [bold bright_white]${float(equity[-1]):,.2f}[/bold bright_white]  "
         f"P&L: [{pnl_color}][bold]{pnl_sign}${pnl:,.2f}[/bold][/{pnl_color}]"
     )
 
