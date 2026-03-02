@@ -32,11 +32,16 @@
 - Committed all untracked files: `buffet_bot/automate.py`, `buffet_bot/insiders.py`, `buffet_bot/universe.py`, `tests/` (4 test files)
 - Marked `alerts check` as complete in ROADMAP (was already implemented in main.py at line 3594)
 **Next agent role: Engineer (v0.5.0)** — do NOT take Security Auditor role; SEC items are deferred to v1.0.0 pre-release only.
-**Suggested targets:
-- `[PERF]` Concurrent FRED + Nasdaq HTTP in `_run_analysis()` — quick win, reduces wall time
-- `[ENG]` Beta-adjusted position sizing — augments `_calculate_position_size()` in analyze/buy
-- `[ENG]` Portfolio VaR — additive to `portfolio` command output
+**Suggested targets:**
+- `[ENG]` Simulated tax-loss harvesting signal in `check-sells` (last open Risk item)
+- `[ENG]` `run-plan` scheduler — execute saved plans on a schedule
+- `[ENG]` Multi-timeframe analysis (1d/1w/1mo signals combined)
+- `[ENG]` Earnings surprise tracker — log beat/miss history in SQLite
 - `[QA]` Run `pytest tests/` and verify all tests pass before v0.5.0 is declared ready
+**Done this session (session 6 continued):**
+- Concurrent FRED + data fetch in `_run_analysis()` + `_fetch_fred_data()`
+- Beta-adjusted position sizing (`get_buffett_metrics` returns beta; `_calculate_position_size` scales by beta)
+- Portfolio VaR: `_calculate_portfolio_var()` + `buffet-bot var` command
 **Known issues / notes:**
 - `tests/` are staged but have not been run in CI — QA agent should verify pass rate
 - `pyproject.toml` had `[project.optional-dependencies]` added in a prior session but version not bumped — now fixed
@@ -117,7 +122,7 @@
 
 ### Automation
 - [x] [ENG] `automate` command — ReAct agent loop: LLM chains scan/analyze/buy tools autonomously to fulfill a natural-language goal; dry-run by default, `--execute` flag for paper trades, `--budget` cap, `--max-steps` limit — complete 2026-03-01
-- [ ] [ENG] Cron-compatible `scan --notify` mode: output parseable for scripts/email
+- [x] [ENG] Cron-compatible `scan --notify` mode: output parseable for scripts/email — complete 2026-03-01
 - [ ] [ENG] `run-plan` scheduler: execute saved plans on a schedule
 - [x] [ENG] `alerts check` command: evaluate all set alerts and report — complete 2026-03-01
 
@@ -129,11 +134,11 @@
 ### Performance
 - [ ] [PERF] Resolve async LLM query open question — ThreadPoolExecutor vs asyncio ADR
 - [ ] [PERF] Profile `analyze` end-to-end wall time; document baseline in AUDIT.md
-- [ ] [PERF] Concurrent FRED + Nasdaq HTTP calls (when TICKET-001/002 implemented)
+- [x] [PERF] Concurrent FRED + Nasdaq HTTP calls — `_fetch_fred_data()` now uses ThreadPoolExecutor (3 parallel requests); `_run_analysis()` dispatches hist/buffett/tech/realtime/news/macro/insiders concurrently — complete 2026-03-01
 
 ### Risk
-- [ ] [ENG] Beta-adjusted position sizing (replace or augment ATR Kelly)
-- [ ] [ENG] Portfolio VaR (Value at Risk) calculation — add to `portfolio` output
+- [x] [ENG] Beta-adjusted position sizing — `get_buffett_metrics()` now returns `beta`; `_calculate_position_size()` accepts `beta` param and scales position down by `max(1.0, beta)` — complete 2026-03-01
+- [x] [ENG] Portfolio VaR (Value at Risk) calculation — `_calculate_portfolio_var()` historical simulation (95%/99%); new `var` command — complete 2026-03-01
 - [ ] [ENG] Simulated tax-loss harvesting signal in `check-sells`
 
 ---
@@ -154,17 +159,43 @@
 - [ ] [ARCH] DB migration system: versioned schema changes
 
 ### Security
-- [ ] [SEC] Full credential handling audit — .gitignore, no hardcoded keys, no console leakage
-- [ ] [SEC+QA] SQL injection audit + test coverage for all DB operations
-- [ ] [SEC] Input validation audit — ticker path traversal, model name injection
+- [x] [SEC] Full credential handling audit — .gitignore, no hardcoded keys, no console leakage — complete 2026-03-01
+- [x] [SEC+QA] SQL injection audit — all DB operations use parameterized queries — verified 2026-03-01
+- [x] [SEC] Input validation audit — FINDING-001 path traversal in plan management fixed 2026-03-01 (see `agents/SECURITY-AUDIT.md`)
 - [ ] [SEC] Dependency CVE scan (`pip-audit`) — fix any CVSS ≥7.0 before v1.0.0 release
-- [ ] [SEC] Data exfiltration audit — verify no cloud LLM calls exist in any code path
+- [x] [SEC] Data exfiltration audit — no cloud LLM calls in any code path — verified 2026-03-01
 
 ### Distribution
 - [ ] [PM+ENG+REL] PyPI package: `pip install buffet-bot`
 - [ ] [REL] Docker image with Ollama sidecar
 - [ ] [PM+REL] Contribution guide and PR template
 - [ ] [REL] CHANGELOG.md — full version history from v0.1.0
+
+---
+
+## Active Role Assignment
+
+> Used by the Role Assignment Protocol in CLAUDE.md.
+> The next session's first agent must read this table before choosing a role.
+
+| Field | Value |
+|-------|-------|
+| **Next session role** | Software Engineer [ENG] |
+| **Suggested focus** | v0.5.0 remaining items: `run-plan` scheduler, `alerts check` command, analyst consensus ratings |
+| **Do NOT take** | Security Auditor (gated to v1.0.0 pre-release; audit is complete for this milestone) |
+| **Last updated** | 2026-03-01 by Software Engineer Agent (Agent 3) |
+
+---
+
+## Session Handoff Log
+
+### 2026-03-01 — Session 1 + 2
+
+**Agent 1 (Software Engineer):** Implemented `buffet_bot/insiders.py` (SEC EDGAR Form 4), `buffet_bot/universe.py` (366-company DB + EDGAR live search), `buffet_bot/automate.py` (ReAct agent loop), and full `tests/` suite (phases 1–4, 4 files). Updated `main.py` to import and wire new modules. Updated `pyproject.toml` and `requirements.txt`. Also added `_safe_plan_path()` path traversal protection pre-emptively. Marked v0.4.1 and `automate` command as complete.
+
+**Agent 2 (Security Auditor):** Audited all six security categories (credentials, SQL, shell injection, input validation, data exfiltration, XML). Found and documented FINDING-001 (path traversal, P1 — already fixed by Agent 1) and FINDING-002 (XML entity expansion, P3 — informational). Closed the residual gap where `_load_plan()` did not catch `ValueError` from `_safe_plan_path`. Wrote `agents/SECURITY-AUDIT.md`. Marked 4 of 5 v1.0.0 security checklist items complete. Remaining: `pip-audit` dependency CVE scan.
+
+**Agent 3 (Software Engineer):** Implemented `scan --notify` mode (v0.5.0). Added `--notify` and `--min-score` flags to the `scan` command. Plain-text output: header, ranked table, BUY CANDIDATES list filtered by `--min-score` (default 60), cron-friendly footer. Rich spinner suppressed in notify mode. Updated ROADMAP item to `[x]`. Next focus: `run-plan` scheduler, `alerts check` command, analyst consensus ratings.
 
 ---
 

@@ -1,5 +1,6 @@
 import os
 import json
+import pathlib
 import click
 import contextlib
 import requests
@@ -73,6 +74,14 @@ MODEL_COLORS = {
 PLANS_DIR   = os.path.expanduser("~/.buffet-plans")
 DB_PATH     = os.path.expanduser("~/.buffet-bot.db")
 CONFIG_PATH = os.path.expanduser("~/.buffet-bot-config.toml")
+
+def _safe_plan_path(name: str) -> pathlib.Path:
+    """Return the resolved Path for a plan file, raising ValueError on path traversal."""
+    plans_dir = pathlib.Path(PLANS_DIR).resolve()
+    target = (plans_dir / f"{name}.json").resolve()
+    if not str(target).startswith(str(plans_dir) + os.sep):
+        raise ValueError(f"Invalid plan name: {name!r}")
+    return target
 
 FRED_API_KEY = os.getenv('FRED_API_KEY', '')
 
@@ -367,6 +376,7 @@ def get_buffett_metrics(ticker):
         if 0 < pb < 5:      score += 3;  metrics['pb_pass'] = True
         if div_yield > 1.5: score += 2;  metrics['div_pass'] = True
 
+        beta = float(info.get('beta') or 1.0)
         metrics.update({
             'score':        score,
             'roe':          round(roe, 1),
@@ -378,6 +388,7 @@ def get_buffett_metrics(ticker):
             'pb':           round(pb, 2),
             'div_yield':    round(div_yield, 2),
             'eg_1y':        round(eg_1y, 1),
+            'beta':         round(beta, 2),
         })
         return metrics
     except Exception as e:
@@ -440,12 +451,12 @@ def get_realtime_data(ticker):
         return {}
 
 def _fetch_fred_data() -> dict:
-    """Fetch latest Fed rate, yield curve, and CPI from FRED. Returns {} if key missing."""
+    """Fetch latest Fed rate, yield curve, and CPI from FRED (3 concurrent requests)."""
     if not FRED_API_KEY:
         return {}
     series = {'DFF': 'fed_rate', 'T10Y2Y': 'yield_curve', 'CPIAUCSL': 'cpi'}
-    result = {}
-    for series_id, key in series.items():
+
+    def _fetch_one(series_id, key):
         try:
             r = requests.get(
                 "https://api.stlouisfed.org/fred/series/observations",
@@ -460,9 +471,17 @@ def _fetch_fred_data() -> dict:
             )
             r.raise_for_status()
             val = r.json()['observations'][0]['value']
-            result[key] = float(val)   # raises ValueError on "." (missing data)
+            return key, float(val)
         except Exception:
-            pass
+            return key, None
+
+    result = {}
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        futs = [ex.submit(_fetch_one, sid, key) for sid, key in series.items()]
+        for f in as_completed(futs):
+            k, v = f.result()
+            if v is not None:
+                result[k] = v
     return result
 
 def _get_earnings_date(ticker: str) -> dict | None:
@@ -600,13 +619,32 @@ def _query_llms_freeform(prompt_text, primary_model):
 
 def _run_analysis(ticker, risk, primary_model, strategy='value'):
     """Fetch data, query LLMs, compute consensus. Returns analysis dict."""
-    hist = yf.download(ticker, period='6mo', progress=False)['Close'].tail(30)
-    buffett = get_buffett_metrics(ticker)
-    tech = get_tech_indicators(ticker) if risk == 'high' else {}
-    realtime = get_realtime_data(ticker)
-    news = get_recent_news(ticker)
+    # ── Concurrent I/O fetch ─────────────────────────────────────────────────
+    def _hist_dl():
+        return yf.download(ticker, period='6mo', progress=False)['Close'].tail(30)
+
+    with ThreadPoolExecutor(max_workers=7) as ex:
+        f_hist     = ex.submit(_hist_dl)
+        f_buffett  = ex.submit(get_buffett_metrics, ticker)
+        f_realtime = ex.submit(get_realtime_data, ticker)
+        f_news     = ex.submit(get_recent_news, ticker)
+        f_macro    = ex.submit(_fetch_fred_data)
+        f_insiders = ex.submit(fetch_insider_transactions, ticker, 60, 5, 5)
+        f_tech     = ex.submit(get_tech_indicators, ticker) if risk == 'high' else None
+
+    hist     = f_hist.result()
+    buffett  = f_buffett.result()
+    tech     = f_tech.result() if f_tech else {}
+    realtime = f_realtime.result()
+    news     = f_news.result()
+    macro    = f_macro.result()
+    try:
+        insider_txns = f_insiders.result()
+    except Exception:
+        insider_txns = []
+
+    # Sentiment depends on news — LLM call after concurrent fetch
     sentiment = analyze_news_sentiment(news, ticker, primary_model)
-    macro = _fetch_fred_data()
 
     # Live market block
     if realtime:
@@ -644,12 +682,7 @@ def _run_analysis(ticker, risk, primary_model, strategy='value'):
             f"CPI index {macro.get('cpi', 'N/A')}."
         )
 
-    insiders_block = ""
-    try:
-        insider_txns = fetch_insider_transactions(ticker, days=60, limit=5, max_filings=5)
-        insiders_block = insider_prompt_block(insider_txns)
-    except Exception:
-        pass
+    insiders_block = insider_prompt_block(insider_txns)
 
     strategy_guidance = STRATEGY_PROMPTS.get(strategy, STRATEGY_PROMPTS['value'])
 
@@ -798,16 +831,19 @@ def _ensure_plans_dir():
 
 def _save_plan(name, plan_data):
     _ensure_plans_dir()
+    path = _safe_plan_path(name)
     plan_data['name'] = name
     plan_data['updated_at'] = datetime.now().isoformat()
-    path = os.path.join(PLANS_DIR, f"{name}.json")
     with open(path, 'w') as f:
         json.dump(plan_data, f, indent=2, default=str)
-    return path
+    return str(path)
 
 def _load_plan(name):
-    path = os.path.join(PLANS_DIR, f"{name}.json")
-    if not os.path.exists(path):
+    try:
+        path = _safe_plan_path(name)
+    except ValueError:
+        return None
+    if not path.exists():
         return None
     with open(path) as f:
         return json.load(f)
@@ -1000,9 +1036,12 @@ def _guide_build_plan(primary_model):
 
     if click.confirm("\nSave as a recurring investment plan?", default=False):
         plan_name = Prompt.ask("Plan name", default=f"{goal}-plan")
-        path = _save_plan(plan_name, plan_data)
-        console.print(f"[green]Plan saved: {path}[/green]")
-        console.print(f"[dim]Re-run any time: buffet-bot guide --plan {plan_name}[/dim]")
+        try:
+            path = _save_plan(plan_name, plan_data)
+            console.print(f"[green]Plan saved: {path}[/green]")
+            console.print(f"[dim]Re-run any time: buffet-bot guide --plan {plan_name}[/dim]")
+        except ValueError as e:
+            console.print(f"[red]Could not save plan: {e}[/red]")
 
     _execute_plan_buys(buy_candidates)
 
@@ -1202,8 +1241,12 @@ def _get_atr(ticker, period=14):
         return None
 
 
-def _calculate_position_size(ticker, confidence, cash, risk_pct=0.02):
-    """ATR-based dynamic position sizing."""
+def _calculate_position_size(ticker, confidence, cash, risk_pct=0.02, beta=1.0):
+    """ATR + beta-adjusted dynamic position sizing.
+
+    Beta > 1.0 scales the position down proportionally — a beta-2 stock
+    gets half the dollar allocation of a beta-1 stock at equal ATR.
+    """
     try:
         live  = get_realtime_data(ticker)
         price = live.get('price', 0)
@@ -1214,6 +1257,9 @@ def _calculate_position_size(ticker, confidence, cash, risk_pct=0.02):
             atr = price * 0.02
         atr_pct     = atr / price
         dollar_size = cash * (confidence * risk_pct) / atr_pct
+        # Beta adjustment: scale down for high-volatility stocks
+        beta_factor = max(1.0, float(beta) if beta else 1.0)
+        dollar_size /= beta_factor
         qty         = max(1, math.floor(dollar_size / price))
         return {
             'qty':         qty,
@@ -1221,6 +1267,63 @@ def _calculate_position_size(ticker, confidence, cash, risk_pct=0.02):
             'atr_pct':     round(atr_pct * 100, 2),
             'atr':         round(atr, 4),
             'price':       price,
+            'beta':        round(beta_factor, 2),
+        }
+    except Exception:
+        return None
+
+
+def _calculate_portfolio_var(positions, confidence=0.95, lookback_days=252):
+    """Historical-simulation Value at Risk for the current portfolio.
+
+    Downloads `lookback_days` of daily returns for each position, computes
+    the weighted portfolio daily P&L series, then returns the
+    (1-confidence) percentile as the 1-day VaR in dollar terms.
+
+    Returns a dict or None on failure (insufficient data / empty portfolio).
+    """
+    if not positions:
+        return None
+    try:
+        tickers = [p.symbol for p in positions]
+        values  = {p.symbol: float(p.market_value) for p in positions}
+        total   = sum(values.values())
+        if total <= 0:
+            return None
+        weights = {t: values[t] / total for t in tickers}
+
+        raw = yf.download(
+            tickers,
+            period=f'{lookback_days}d',
+            auto_adjust=True,
+            progress=False,
+        )
+        if isinstance(raw.columns, pd.MultiIndex):
+            close = raw['Close']
+        else:
+            # Single ticker: flat columns (Open, High, Low, Close, Volume)
+            close = raw[['Close']].rename(columns={'Close': tickers[0]})
+
+        returns = close.pct_change().dropna()
+        if returns.empty or len(returns) < 30:
+            return None
+
+        # Keep only tickers present in downloaded data
+        valid = [t for t in tickers if t in returns.columns]
+        port_returns = sum(weights[t] * returns[t] for t in valid)
+        port_pnl     = port_returns * total
+
+        var_dollar = float(np.percentile(port_pnl, (1 - confidence) * 100))
+        cvar_dollar = float(port_pnl[port_pnl <= var_dollar].mean()) if (port_pnl <= var_dollar).any() else var_dollar
+
+        return {
+            'var_1d':        round(abs(var_dollar), 2),
+            'cvar_1d':       round(abs(cvar_dollar), 2),
+            'var_pct':       round(abs(var_dollar) / total * 100, 2),
+            'portfolio_val': round(total, 2),
+            'confidence':    confidence,
+            'tickers':       valid,
+            'n_days':        len(returns),
         }
     except Exception:
         return None
@@ -1705,15 +1808,17 @@ def analyze(ticker, risk, dry_run, primary_model, strategy, as_json):
             account    = trading_client.get_account()
             cash       = float(account.cash)
             confidence = result['best_buy_resp'].get('confidence', 0.5) if result['best_buy_resp'] else 0.5
-            sizing     = _calculate_position_size(ticker, confidence, cash)
+            beta       = result['buffett'].get('beta', 1.0)
+            sizing     = _calculate_position_size(ticker, confidence, cash, beta=beta)
             if sizing:
-                llm_qty = result['best_buy_resp'].get('qty', 1) if result['best_buy_resp'] else 1
+                llm_qty    = result['best_buy_resp'].get('qty', 1) if result['best_buy_resp'] else 1
+                beta_note  = f"  |  Beta: [yellow]{sizing['beta']}x[/yellow]" if sizing['beta'] != 1.0 else ""
                 console.print(Panel(
                     f"Account cash: [bold]${cash:,.2f}[/bold]\n"
                     f"LLM suggested qty:   [dim]{llm_qty}[/dim]\n"
                     f"Formula qty:         [bold cyan]{sizing['qty']}[/bold cyan]  "
                     f"(${sizing['dollar_size']:,.2f})\n"
-                    f"ATR: ${sizing['atr']:.2f}  ({sizing['atr_pct']}% of price)",
+                    f"ATR: ${sizing['atr']:.2f}  ({sizing['atr_pct']}% of price){beta_note}",
                     title="[bold cyan]Dynamic Position Sizing[/bold cyan]",
                     border_style="cyan",
                 ))
@@ -1766,15 +1871,17 @@ def buy(ticker, risk, primary_model, strategy):
         account    = trading_client.get_account()
         cash       = float(account.cash)
         confidence = result['best_buy_resp'].get('confidence', 0.5)
-        sizing     = _calculate_position_size(ticker, confidence, cash)
+        beta       = result['buffett'].get('beta', 1.0)
+        sizing     = _calculate_position_size(ticker, confidence, cash, beta=beta)
         if sizing:
-            llm_qty = result['best_buy_resp'].get('qty', 1)
+            llm_qty   = result['best_buy_resp'].get('qty', 1)
+            beta_note = f"  |  Beta: [yellow]{sizing['beta']}x[/yellow]" if sizing['beta'] != 1.0 else ""
             console.print(Panel(
                 f"Account cash: [bold]${cash:,.2f}[/bold]\n"
                 f"LLM suggested qty:   [dim]{llm_qty}[/dim]\n"
                 f"Formula qty:         [bold cyan]{sizing['qty']}[/bold cyan]  "
                 f"(${sizing['dollar_size']:,.2f})\n"
-                f"ATR: ${sizing['atr']:.2f}  ({sizing['atr_pct']}% of price)",
+                f"ATR: ${sizing['atr']:.2f}  ({sizing['atr_pct']}% of price){beta_note}",
                 title="[bold cyan]Dynamic Position Sizing[/bold cyan]",
                 border_style="cyan",
             ))
@@ -1967,20 +2074,24 @@ def chat(primary_model):
               help='Number of top results to show (0 = show all).')
 @click.option('--json', 'as_json', is_flag=True, default=False,
               help='Output results as JSON (suppresses Rich output).')
-def scan(use_watchlist, top, as_json):
+@click.option('--notify', 'as_notify', is_flag=True, default=False,
+              help='Plain-text report for cron/email — pipe to sendmail or a script.')
+@click.option('--min-score', 'min_score', default=60, show_default=True, type=int,
+              help='Minimum Buffett score to include in --notify BUY CANDIDATES list.')
+def scan(use_watchlist, top, as_json, as_notify, min_score):
     """Scan top stocks for Buffett opportunities"""
     default_tickers = ['AAPL', 'MSFT', 'GOOGL', 'BRK-B', 'JNJ', 'V', 'JPM', 'PG']
     if use_watchlist:
         saved = get_watchlist()
         tickers = [w['ticker'] for w in saved] if saved else default_tickers
-        if not saved and not as_json:
+        if not saved and not as_json and not as_notify:
             console.print("[dim yellow]Watchlist is empty — using default tickers.[/dim yellow]")
     else:
         tickers = default_tickers
 
     all_metrics = {}
     scan_ctx = (console.status("[bold blue]Scanning tickers (concurrent)...[/bold blue]")
-                if not as_json else contextlib.nullcontext())
+                if not as_json and not as_notify else contextlib.nullcontext())
     with scan_ctx:
         with ThreadPoolExecutor(max_workers=len(tickers)) as pool:
             futures = {pool.submit(get_buffett_metrics, t): t for t in tickers}
@@ -2000,6 +2111,41 @@ def scan(use_watchlist, top, as_json):
             [{'ticker': t, 'buffett_score': m.get('score', 0)} for t, m in ranked],
             indent=2,
         ))
+        return
+
+    if as_notify:
+        def _f(v, w):
+            return f"{v:.1f}".rjust(w) if v is not None else '-'.rjust(w)
+
+        scanned_at = datetime.now().strftime('%Y-%m-%d %H:%M')
+        sep = '=' * 50
+        click.echo("BUFFET-BOT SCAN REPORT")
+        click.echo(f"Date:    {scanned_at}")
+        click.echo(f"Tickers: {' '.join(tickers)}")
+        click.echo(sep)
+        click.echo(f"{'RNK':<4} {'TICKER':<8} {'SCORE':>5}  {'ROE%':>6}  {'DEBT/EQ':>7}  {'OPMGN%':>7}  {'P/E':>6}")
+        click.echo('-' * 50)
+        for rank, (ticker, m) in enumerate(ranked, 1):
+            score  = m.get('score', 0)
+            roe    = m.get('roe', None)
+            debt   = m.get('debt_eq', None)
+            margin = m.get('op_margin', None)
+            pe     = m.get('pe', None)
+            click.echo(
+                f"{rank:<4} {ticker:<8} {score:>5}  "
+                f"{_f(roe, 6)}  {_f(debt, 7)}  {_f(margin, 7)}  {_f(pe, 6)}"
+            )
+        click.echo(sep)
+        candidates = [t for t, m in ranked if m.get('score', 0) >= min_score]
+        if candidates:
+            scores_str = ', '.join(
+                f"{t}({all_metrics[t].get('score', 0)})" for t in candidates
+            )
+            click.echo(f"BUY CANDIDATES (score >= {min_score}): {scores_str}")
+        else:
+            click.echo(f"BUY CANDIDATES (score >= {min_score}): none")
+        click.echo(f"Scanned {len(tickers)} tickers at {scanned_at}.")
+        click.echo("Run: buffet-bot analyze <TICKER> for full LLM analysis.")
         return
 
     scanned_at = datetime.now().strftime('%Y-%m-%d %H:%M')
@@ -2160,16 +2306,24 @@ def plans(run_plan, delete_plan, primary_model):
       buffet-bot plans --delete my-plan   # remove a plan
     """
     if delete_plan:
-        path = os.path.join(PLANS_DIR, f"{delete_plan}.json")
-        if os.path.exists(path):
-            os.remove(path)
+        try:
+            path = _safe_plan_path(delete_plan)
+        except ValueError:
+            console.print(f"[red]Invalid plan name: {delete_plan!r}[/red]")
+            return
+        if path.exists():
+            path.unlink()
             console.print(f"[green]Deleted plan '{delete_plan}'.[/green]")
         else:
             console.print(f"[red]Plan '{delete_plan}' not found.[/red]")
         return
 
     if run_plan:
-        plan_data = _load_plan(run_plan)
+        try:
+            plan_data = _load_plan(run_plan)
+        except ValueError:
+            console.print(f"[red]Invalid plan name: {run_plan!r}[/red]")
+            return
         if not plan_data:
             console.print(f"[red]Plan '{run_plan}' not found.[/red]")
             return
@@ -3817,6 +3971,57 @@ def options(ticker, expiry, top):
         else "Neutral sentiment"
     )
     console.print(f"[dim]{pc_interp}  |  {len(expirations)} expiries available[/dim]")
+
+
+@cli.command()
+@click.option('--confidence', default=0.95, show_default=True, type=float,
+              help='Confidence level for VaR (e.g. 0.95 = 95%, 0.99 = 99%).')
+@click.option('--days', default=252, show_default=True, type=int,
+              help='Lookback window in trading days for historical simulation.')
+def var(confidence, days):
+    """Portfolio Value-at-Risk (historical simulation): buffet-bot var
+
+    \b
+    Computes 1-day VaR and CVaR for your current Alpaca paper positions
+    using historical daily returns over the last --days trading days.
+
+    Examples:
+      buffet-bot var                  # 95% VaR, 1-year history
+      buffet-bot var --confidence 0.99 --days 504
+    """
+    try:
+        positions = trading_client.get_all_positions()
+    except Exception as e:
+        console.print(f"[red]Could not fetch positions: {e}[/red]")
+        return
+
+    if not positions:
+        console.print("[yellow]No open positions. Open some trades first.[/yellow]")
+        return
+
+    pct_str = f"{int(confidence * 100)}%"
+    with console.status(f"[bold blue]Fetching {days}d price history for VaR...[/bold blue]"):
+        result = _calculate_portfolio_var(positions, confidence=confidence, lookback_days=days)
+
+    if result is None:
+        console.print("[yellow]Insufficient price history to calculate VaR "
+                      "(need at least 30 trading days).[/yellow]")
+        return
+
+    tail_pct = 100 - int(confidence * 100)
+    console.print(Panel(
+        f"Portfolio value:     [bold]${result['portfolio_val']:,.2f}[/bold]\n"
+        f"Positions:           [dim]{', '.join(result['tickers'])}[/dim]\n"
+        f"History used:        {result['n_days']} trading days\n\n"
+        f"{pct_str} 1-Day VaR:   [bold red]-${result['var_1d']:,.2f}[/bold red]  "
+        f"([bold red]{result['var_pct']:.2f}%[/bold red] of portfolio)\n"
+        f"{pct_str} CVaR (ES):   [bold red]-${result['cvar_1d']:,.2f}[/bold red]  "
+        f"[dim](expected loss beyond VaR)[/dim]\n\n"
+        f"[dim]On the worst {tail_pct}% of trading days, this portfolio is "
+        f"expected to lose more than ${result['var_1d']:,.2f}.[/dim]",
+        title=f"[bold]Portfolio Value at Risk — {pct_str} / 1-Day[/bold]",
+        border_style="red",
+    ))
 
 
 @cli.command()
