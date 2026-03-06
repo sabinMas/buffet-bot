@@ -517,3 +517,142 @@ class TestCompoundCommand:
     def test_invalid_source_fails(self, runner):
         result = runner.invoke(cli, ['compound', '--source', 'crypto'])
         assert result.exit_code != 0
+
+
+# ── edge-scan command ─────────────────────────────────────────────────────────
+
+def _make_edge_result(ticker='AAPL', edge_score=72.5):
+    """Minimal compute_edge_score() result for CLI test stubs."""
+    return {
+        'ticker':          ticker,
+        'edge_score':      edge_score,
+        'components':      {
+            'buffett': 80.0, 'llm': 70.0, 'insider': 65.0,
+            'politician': 60.0, 'earnings': 75.0, 'analyst': 68.0,
+        },
+        'weights_used':    {
+            'buffett': 0.30, 'llm': 0.20, 'insider': 0.20,
+            'politician': 0.10, 'earnings': 0.10, 'analyst': 0.10,
+        },
+        'simulation_date': None,
+    }
+
+
+class TestEdgeScanCommand:
+    """Tests for: buffet-bot edge-scan [--universe] [--tickers] [--min-edge]
+                                       [--top] [--weights] [--json] [--no-save]
+    """
+
+    def test_help_exits_zero(self, runner):
+        result = runner.invoke(cli, ['edge-scan', '--help'])
+        assert result.exit_code == 0
+        assert '--universe' in result.output
+        assert '--min-edge' in result.output
+        assert '--json'     in result.output
+
+    def test_scores_tickers_and_shows_table(self, runner, in_memory_db, monkeypatch):
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', in_memory_db)
+        results = [_make_edge_result('AAPL', 75.0), _make_edge_result('KO', 68.0)]
+        with patch('buffet_bot.cmd_intel.compute_edge_score', side_effect=results):
+            with patch('buffet_bot.cmd_intel.log_edge_scan'):
+                result = runner.invoke(cli, ['edge-scan', '--universe', 'buffett',
+                                             '--min-edge', '0'])
+        assert result.exit_code == 0
+        assert 'AAPL' in result.output or 'KO' in result.output
+
+    def test_min_edge_filters_below_threshold(self, runner, in_memory_db, monkeypatch):
+        """All scores below --min-edge should produce the 'no tickers passed' message."""
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', in_memory_db)
+        low_results = [_make_edge_result('AAPL', 20.0)]
+        with patch('buffet_bot.cmd_intel.compute_edge_score', side_effect=low_results):
+            with patch('buffet_bot.cmd_intel.log_edge_scan'):
+                result = runner.invoke(cli, ['edge-scan', '--universe', 'buffett',
+                                             '--tickers', 'AAPL', '--min-edge', '99'])
+        assert result.exit_code == 0
+        assert 'min-edge' in result.output.lower() or 'passed' in result.output.lower() \
+               or 'No tickers' in result.output
+
+    def test_tickers_flag_overrides_universe(self, runner, in_memory_db, monkeypatch):
+        """--tickers must be scored instead of the preset universe."""
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', in_memory_db)
+        mock_score = MagicMock(return_value=_make_edge_result('NVDA', 88.0))
+        with patch('buffet_bot.cmd_intel.compute_edge_score', mock_score):
+            with patch('buffet_bot.cmd_intel.log_edge_scan'):
+                result = runner.invoke(cli, ['edge-scan', '--tickers', 'NVDA',
+                                             '--min-edge', '0'])
+        assert result.exit_code == 0
+        # compute_edge_score was called with NVDA
+        called_tickers = {call.args[0] for call in mock_score.call_args_list}
+        assert 'NVDA' in called_tickers
+
+    def test_json_flag_outputs_valid_json(self, runner, in_memory_db, monkeypatch):
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', in_memory_db)
+        results = [_make_edge_result('AAPL', 75.0)]
+        with patch('buffet_bot.cmd_intel.compute_edge_score', side_effect=results):
+            with patch('buffet_bot.cmd_intel.log_edge_scan'):
+                result = runner.invoke(cli, ['edge-scan', '--tickers', 'AAPL',
+                                             '--min-edge', '0', '--json'])
+        assert result.exit_code == 0
+        # Output must contain valid JSON (may have Rich markup prefix — find the array)
+        import json as _json
+        text = result.output
+        start = text.find('[')
+        assert start != -1, "No JSON array found in output"
+        data = _json.loads(text[start:])
+        assert isinstance(data, list)
+        assert data[0]['ticker'] == 'AAPL'
+
+    def test_no_save_skips_log_edge_scan(self, runner, in_memory_db, monkeypatch):
+        """--no-save must not call log_edge_scan."""
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', in_memory_db)
+        mock_log = MagicMock()
+        results = [_make_edge_result('AAPL', 75.0)]
+        with patch('buffet_bot.cmd_intel.compute_edge_score', side_effect=results):
+            with patch('buffet_bot.cmd_intel.log_edge_scan', mock_log):
+                runner.invoke(cli, ['edge-scan', '--tickers', 'AAPL',
+                                    '--min-edge', '0', '--no-save'])
+        mock_log.assert_not_called()
+
+    def test_save_calls_log_edge_scan(self, runner, in_memory_db, monkeypatch):
+        """Default --save must call log_edge_scan once per scored ticker."""
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', in_memory_db)
+        mock_log = MagicMock()
+        results = [_make_edge_result('AAPL', 75.0)]
+        with patch('buffet_bot.cmd_intel.compute_edge_score', side_effect=results):
+            with patch('buffet_bot.cmd_intel.log_edge_scan', mock_log):
+                runner.invoke(cli, ['edge-scan', '--tickers', 'AAPL', '--min-edge', '0'])
+        mock_log.assert_called_once()
+
+    def test_invalid_universe_fails(self, runner):
+        result = runner.invoke(cli, ['edge-scan', '--universe', 'invalid_universe'])
+        assert result.exit_code != 0
+
+    def test_invalid_weights_json_fails(self, runner, in_memory_db, monkeypatch):
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', in_memory_db)
+        result = runner.invoke(cli, ['edge-scan', '--tickers', 'AAPL',
+                                     '--weights', 'not-valid-json'])
+        assert result.exit_code == 0  # exits cleanly with error message
+        assert 'Invalid' in result.output or 'invalid' in result.output.lower()
+
+    def test_top_limits_displayed_results(self, runner, in_memory_db, monkeypatch):
+        """--top N should cap results: summary line shows N passed."""
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', in_memory_db)
+        # Use a side_effect function so the ticker argument determines the score,
+        # making the result independent of thread execution order.
+        def _score_by_ticker(ticker, *args, **kwargs):
+            scores = {'AAPL': 90.0, 'MSFT': 85.0, 'NVDA': 80.0}
+            return _make_edge_result(ticker, scores.get(ticker, 50.0))
+
+        with patch('buffet_bot.cmd_intel.compute_edge_score', side_effect=_score_by_ticker):
+            with patch('buffet_bot.cmd_intel.log_edge_scan'):
+                result = runner.invoke(cli, [
+                    'edge-scan',
+                    '--tickers', 'AAPL', '--tickers', 'MSFT', '--tickers', 'NVDA',
+                    '--min-edge', '0', '--top', '2',
+                ])
+        assert result.exit_code == 0
+        # Footer confirms: 3 scored total, 2 displayed (top=2)
+        assert '3 scored' in result.output
+        assert '2 passed' in result.output
+        # NVDA (lowest at 80) should not appear in the top-2 table
+        assert 'NVDA' not in result.output

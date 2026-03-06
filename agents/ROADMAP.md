@@ -25,15 +25,31 @@
 | 15      | PM / Release Manager (v0.5.0 release) | complete — 2026-03-06 |
 | 16      | Architect (v0.6.0 design — live trading guard + compound + sweep) | complete |
 | 17      | ENG (v0.6.0 — compound command + automate --sweep) | complete — 2026-03-06 |
-| **18 →**| **QA (v0.6.0 — live guard + compound tests) OR ENG (v0.7.0 edge.py)** | **next** |
+| 18      | ENG (v0.7.0 — edge.py + edge-scan command, ADR-013) | complete — 2026-03-06 |
+| 19      | QA (v0.7.0 — edge.py + edge-scan + db edge helpers tests) | complete — 2026-03-06 |
+| **20 →**| **ENG (v0.7.0 — LLM injection into edge-scan) OR ENG (v0.8.0 options_engine.py — ADR-014)** | **next** |
 
-**Current milestone:** v0.5.0 SHIPPED (tag v0.5.0, 2026-03-06). v0.6.0 Live Guard ARCH+ENG complete. Several v0.6.0 display-only ENG items also done early.
+**Current milestone:** v0.5.0 SHIPPED. v0.6.0 Live Guard + Compounding Engine complete. v0.7.0 Edge Score Engine complete (edge.py, edge-scan command, 62 new tests — 248 total passing).
 **Do NOT take Security Auditor** until v1.0.0 milestone is explicitly started.
-**Session 17 focus:** ENG — `compound_log`+`sweeps` tables in `db.py`, `compound` command in `cmd_portfolio.py`, `automate --sweep` flag, Alpaca corporate actions endpoint. All unblocked by live_guard.py (done). See ADR-012 for schema design. Also commit `buffet_bot/live_guard.py` (untracked — implement and stage first).
+**Session 20 focus:** ENG — wire Ollama `llm_score` injection into `edge-scan` (call `qwen2.5:7b` per ticker to fill the 20% LLM weight), OR begin `options_engine.py` (ADR-014).
 
 ---
 
 ## Session Handoff Log
+
+### 2026-03-06 — QA (session 19 — v0.7.0 Edge Score Engine tests)
+**Role taken:** QA — v0.7.0 edge.py + edge-scan + db edge helpers
+**What was done:**
+- **`tests/test_edge.py`** (new, 62 tests): `TestComputeInsiderSignal` (7 tests — no-data neutral, bullish/bearish/neutral branches, full-scale at $1M, simulation_date filtering); `TestComputePoliticianSignal` (6 tests — neutral/100/0/75% ratios, Exchange exclusion, simulation_date cutoff); `TestComputeEarningsSignal` (6 tests — 100/0/50% beat rates, single beat, lookback_quarters passthrough); `TestAnalystToScore` (10 tests — empty/None/missing upside, zero/positive/negative upside, clamp at 0 and 100); `TestComputeEdgeScore` (13 tests — return shape, ticker uppercase, all-neutral=50, all component keys, weight normalisation, partial weight override, high buffett raises score, llm_score injection, llm_score raises edge, simulation_date propagated, no simulation_date=None, component exception falls back to 50, weights_used keys match defaults)
+- **`tests/test_db.py`** (10 new tests — `TestEdgeTable`): table created by init_db, log_edge_scan returns positive id, stores ticker+score, stores all 5 component scores, get_edge_history returns rows, filters by ticker, respects limit, empty returns [], silent on bad DB path (log and get)
+- **`tests/test_cli.py`** (10 new tests — `TestEdgeScanCommand`): help exits zero, scores tickers + shows table, min-edge filters below threshold, --tickers overrides universe, --json outputs valid JSON, --no-save skips log_edge_scan, --save calls log_edge_scan, invalid universe fails, invalid weights JSON exits cleanly with error message, --top limits displayed results (deterministic mock using side_effect function keyed on ticker to avoid ThreadPoolExecutor ordering races)
+- **Total tests:** 186 → 248 passing (62 new); 0 failures
+
+**Bug fixed:** `test_top_limits_displayed_results` initially used a `side_effect` list which was race-prone across ThreadPoolExecutor threads. Fixed by replacing with a `side_effect` callable that keys score lookup on the ticker argument, making results deterministic regardless of execution order.
+
+**Next:** ENG session 20 — wire Ollama LLM conviction score into `edge-scan` (`--llm` flag, calls `qwen2.5:7b` per ticker to fill the 20% llm weight); OR begin `options_engine.py` (ADR-014)
+
+---
 
 ### 2026-03-06 — PM / Release Manager (session 15 — v0.5.0 release)
 **Role taken:** PM / Release Manager [REL] — v0.5.0 release preparation and tagging
@@ -64,6 +80,20 @@
 - [x] No placeholder stubs — all v0.5.0 items are `[x]` complete
 
 **Next:** ENG session 17 — v0.6.0 compound command + automate --sweep (see ADR-012); commit live_guard.py first
+
+---
+
+### 2026-03-06 — Software Engineer (session 18 — v0.7.0 Edge Score Engine)
+**Role taken:** Software Engineer [ENG] — v0.7.0 Multi-Factor Edge Score (ADR-013)
+**What was done:**
+- **`buffet_bot/edge.py`** (new module): `DEFAULT_WEIGHTS` dict; `compute_insider_signal()` (buy/sell net sentiment, scales 0–100 on net dollar magnitude, respects `simulation_date`); `compute_politician_signal()` (House + FMP congressional purchase ratio, deduped, anti-lookahead); `compute_earnings_signal()` (beat rate from `db.get_earnings_history()`); `_analyst_to_score()` (maps `upside_pct` → 0–100); `compute_edge_score()` (5-way concurrent ThreadPoolExecutor fan-out, graceful 50=neutral fallback on failures, weight normalisation)
+- **`buffet_bot/db.py`**: `init_edge_table()` (creates `edge_scans` table with per-component columns, ticker + timestamp indexes); `log_edge_scan()` (persists compute_edge_score result); `get_edge_history()` (query by ticker + recency window); wired into `init_db()`
+- **`buffet_bot/globals.py`**: added `[edge]` section to `_CONFIG_DEFAULTS` (`min_score=60`, all 6 weight keys)
+- **`buffet_bot/cmd_intel.py`**: `edge-scan` command — `--universe` (buffett/growth/income/balanced/etf/watchlist), `--tickers` (repeatable override), `--min-edge`, `--top`, `--weights` (JSON factor weight override), `--json`, `--save/--no-save`; coloured bar column; per-factor score columns; weight summary footer; concurrent scoring (4 workers)
+- **`buffet_bot/main.py`**: registered `edge_scan` command
+- **Verified**: all 186 tests pass; `edge-scan --help` renders correctly; all imports clean
+
+**Next:** QA session — tests for `compute_edge_score()`, `compute_insider_signal()`, `compute_politician_signal()`, `compute_earnings_signal()`, `log_edge_scan()`, `get_edge_history()`, and `edge-scan` CLI; OR ENG session for LLM injection into edge-scan (pass Ollama conviction score as `llm_score` parameter)
 
 ---
 
@@ -344,10 +374,10 @@
 ## v0.7.0 — Multi-Factor EDGE_SCORE
 
 ### Edge Intelligence
-- [ ] [ARCH] `buffet_bot/edge.py`: `compute_edge_score()`, `compute_insider_signal()`, `compute_politician_signal()`, `compute_earnings_signal()`
-- [ ] [ENG] `[edge]` section in `_CONFIG_DEFAULTS` (globals.py): configurable signal weights (W_BUFFETT=0.30, W_LLM=0.20, W_INSIDER=0.20, W_POLITICIAN=0.10, W_EARNINGS=0.10, W_ANALYST=0.10)
-- [ ] [ENG] `db.py`: `edge_scans` table for persisting scan results
-- [ ] [ENG] `edge-scan` command in `cmd_intel.py`: `--universe`, `--min-edge`, `--top`, `--weights`, `--json`
+- [x] [ARCH] `buffet_bot/edge.py`: `compute_edge_score()`, `compute_insider_signal()`, `compute_politician_signal()`, `compute_earnings_signal()` — complete 2026-03-06 (session 18)
+- [x] [ENG] `[edge]` section in `_CONFIG_DEFAULTS` (globals.py): configurable signal weights (W_BUFFETT=0.30, W_LLM=0.20, W_INSIDER=0.20, W_POLITICIAN=0.10, W_EARNINGS=0.10, W_ANALYST=0.10) — complete 2026-03-06 (session 18)
+- [x] [ENG] `db.py`: `edge_scans` table for persisting scan results — complete 2026-03-06 (session 18)
+- [x] [ENG] `edge-scan` command in `cmd_intel.py`: `--universe`, `--min-edge`, `--top`, `--weights`, `--json` — complete 2026-03-06 (session 18)
 - [ ] [ENG] `_run_edge_backtest()` in `backtest.py`: weekly-rebalanced EDGE portfolio vs SPY (no lookahead bias — filter all signals by `simulation_date`)
 - [ ] [ENG] `backtest --edge` flag wiring
 
@@ -430,12 +460,12 @@
 
 | Field | Value |
 |-------|-------|
-| **Next session role** | QA (v0.6.0 tests) OR ENG (v0.7.0 edge.py — ADR-013 is the spec) |
-| **Suggested focus (QA)** | Add tests to `tests/test_db.py` for `compound_log`/`sweeps` helpers; add `tests/test_cli.py` cases for `compound --help`, live guard rejection (mock `is_live_mode()=True`, confirm_live_execution with wrong passphrase → returns False); verify 149+ tests pass |
-| **Suggested focus (ENG v0.7.0)** | Implement `buffet_bot/edge.py` per ADR-013: `compute_edge_score()`, `compute_insider_signal()`, `compute_politician_signal()`, `compute_earnings_signal()`; `edge_scans` table in `db.py`; `[edge]` config section in `globals.py` |
+| **Next session role** | QA (v0.6.0 + v0.7.0 tests) OR ENG (v0.7.0 backtest --edge + v0.8.0) |
+| **Suggested focus (QA)** | Add tests to `tests/test_db.py` for `compound_log`/`sweeps` helpers; add `tests/test_edge.py` for edge score components + lookahead bias; verify 238+ tests pass |
+| **Suggested focus (ENG)** | Implement `_run_edge_backtest()` in `backtest.py` + `backtest --edge` flag; OR begin v0.8.0 options engine (ADR-014) |
 | **Do NOT take** | Security Auditor (gated to v1.0.0 pre-release) |
-| **Reminder** | `live_guard.py` is still untracked — `git add buffet_bot/live_guard.py` and commit alongside this session's changes |
-| **Last updated** | 2026-03-06 by Software Engineer Agent (session 17) |
+| **Reminder** | `live_guard.py` and `edge.py` now committed (session 19). All v0.6.0 + v0.7.0 core items complete. |
+| **Last updated** | 2026-03-06 by Architect Agent (session 19) |
 
 ---
 

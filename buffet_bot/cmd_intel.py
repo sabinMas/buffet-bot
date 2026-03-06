@@ -1,5 +1,6 @@
-"""CLI commands: news, insiders, crypto, volatile, options."""
+"""CLI commands: news, insiders, crypto, volatile, options, edge_scan."""
 import os
+import json as _json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import click
@@ -7,10 +8,11 @@ import ollama
 import yfinance as yf
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 from rich import box
 
 from buffet_bot.globals import (
-    console, MODELS, MODEL_COLORS,
+    console, MODELS, MODEL_COLORS, GOAL_PRESETS, _CONFIG,
 )
 from buffet_bot.crypto import CRYPTO_SYMBOLS
 from buffet_bot.data import (
@@ -28,6 +30,8 @@ from buffet_bot.crypto import (
     analyze_crypto as _analyze_crypto,
 )
 from buffet_bot.volatile import scan_volatile, display_volatile_table, VOLATILE_UNIVERSE
+from buffet_bot.edge import compute_edge_score, DEFAULT_WEIGHTS
+from buffet_bot.db import log_edge_scan
 
 
 @click.command()
@@ -349,3 +353,173 @@ def options(ticker, expiry, top):
         else "Neutral sentiment"
     )
     console.print(f"[dim]{pc_interp}  |  {len(expirations)} expiries available[/dim]")
+
+
+# ── Edge Scan ──────────────────────────────────────────────────────────────────
+
+_EDGE_UNIVERSES = {
+    'buffett':  GOAL_PRESETS.get('buffett',  []),
+    'growth':   GOAL_PRESETS.get('growth',   []),
+    'income':   GOAL_PRESETS.get('income',   []),
+    'balanced': GOAL_PRESETS.get('balanced', []),
+    'etf':      GOAL_PRESETS.get('etf',      []),
+}
+
+
+def _edge_score_bar(score: float, width: int = 20) -> str:
+    """Return a Rich-coloured inline bar for a 0-100 score."""
+    filled = round(score / 100 * width)
+    bar    = '█' * filled + '░' * (width - filled)
+    color  = 'bright_green' if score >= 70 else ('bright_yellow' if score >= 50 else 'bright_red')
+    return f'[{color}]{bar}[/{color}]'
+
+
+@click.command('edge-scan')
+@click.option('--universe', 'preset', default='buffett', show_default=True,
+              type=click.Choice(list(_EDGE_UNIVERSES.keys()) + ['watchlist']),
+              help='Ticker universe to scan.')
+@click.option('--tickers', multiple=True, metavar='TICKER',
+              help='Override universe with explicit tickers (repeatable).')
+@click.option('--min-edge', default=None, type=float,
+              help='Minimum edge score to include in output (default: config edge.min_score).')
+@click.option('--top', default=10, show_default=True, type=int,
+              help='Maximum results to display.')
+@click.option('--weights', default=None, type=str,
+              help='JSON override for factor weights, e.g. \'{"insider":0.4,"buffett":0.3}\'.')
+@click.option('--json', 'output_json', is_flag=True, default=False,
+              help='Print raw JSON results instead of table.')
+@click.option('--save/--no-save', default=True, show_default=True,
+              help='Persist scan results to edge_scans table.')
+def edge_scan(preset, tickers, min_edge, top, weights, output_json, save):
+    """Multi-factor edge score scan: buffet-bot edge-scan --universe growth --top 5"""
+    # ── Build ticker list ────────────────────────────────────────────────────
+    if tickers:
+        candidates = [t.upper() for t in tickers]
+    elif preset == 'watchlist':
+        from buffet_bot.db import get_watchlist
+        candidates = [row['ticker'] for row in get_watchlist()]
+        if not candidates:
+            console.print(Panel(
+                "[yellow]Your watchlist is empty.[/yellow]\n"
+                "Add tickers with [bright_cyan]buffet-bot watchlist add AAPL[/bright_cyan]",
+                title="[bold yellow]Empty Watchlist[/bold yellow]",
+                border_style="yellow",
+            ))
+            return
+    else:
+        candidates = list(_EDGE_UNIVERSES.get(preset, []))
+
+    if not candidates:
+        console.print('[red]No tickers to scan.[/red]')
+        return
+
+    # ── Parse custom weights ─────────────────────────────────────────────────
+    custom_weights: dict[str, float] | None = None
+    if weights:
+        try:
+            custom_weights = {k: float(v) for k, v in _json.loads(weights).items()}
+        except Exception:
+            console.print(f'[red]Invalid --weights JSON: {weights}[/red]')
+            return
+
+    # ── Resolve min_edge ─────────────────────────────────────────────────────
+    if min_edge is None:
+        min_edge = float(_CONFIG.get('edge', {}).get('min_score', 60))
+
+    label = f"custom ({len(candidates)})" if tickers else preset
+    console.print(Panel(
+        f"Universe: [bold bright_cyan]{label}[/bold bright_cyan]  |  "
+        f"Tickers: [bold]{len(candidates)}[/bold]  |  "
+        f"Min edge: [bold bright_yellow]{min_edge}[/bold bright_yellow]  |  "
+        f"Top: [bold]{top}[/bold]",
+        title="[bold bright_cyan]Multi-Factor Edge Scan[/bold bright_cyan]",
+        border_style="bright_cyan",
+    ))
+
+    # ── Concurrent scoring ───────────────────────────────────────────────────
+    results: list[dict] = []
+    errors: list[str] = []
+    with console.status('[bright_cyan]Scoring tickers...[/bright_cyan]', spinner='dots'):
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            future_map = {
+                pool.submit(compute_edge_score, t, custom_weights): t
+                for t in candidates
+            }
+            for fut in as_completed(future_map):
+                ticker = future_map[fut]
+                try:
+                    r = fut.result()
+                    results.append(r)
+                    if save:
+                        log_edge_scan(r)
+                except Exception as exc:
+                    errors.append(f'{ticker}: {exc}')
+
+    if errors:
+        console.print(f'[dim red]Errors: {", ".join(errors)}[/dim red]')
+
+    # ── Filter + sort ────────────────────────────────────────────────────────
+    passing = [r for r in results if r['edge_score'] >= min_edge]
+    passing.sort(key=lambda r: r['edge_score'], reverse=True)
+    passing = passing[:top]
+
+    if output_json:
+        console.print_json(_json.dumps(passing, indent=2))
+        return
+
+    if not passing:
+        console.print(
+            f'[yellow]No tickers scored >= {min_edge}. '
+            f'Try lowering --min-edge or expanding your universe.[/yellow]'
+        )
+        return
+
+    # ── Display table ────────────────────────────────────────────────────────
+    tbl = Table(
+        title=f'Edge Scan Results — {label}',
+        box=box.ROUNDED,
+        header_style='bold bright_cyan',
+        show_lines=False,
+    )
+    tbl.add_column('Rank',       justify='right',  style='dim',         no_wrap=True)
+    tbl.add_column('Ticker',     justify='left',   style='bold',        no_wrap=True)
+    tbl.add_column('Edge Score', justify='right',  style='bold',        no_wrap=True)
+    tbl.add_column('Bar',        justify='left',                        no_wrap=True)
+    tbl.add_column('Buffett',    justify='right',  style='bright_cyan', no_wrap=True)
+    tbl.add_column('Insider',    justify='right',  style='bright_cyan', no_wrap=True)
+    tbl.add_column('Politician', justify='right',  style='bright_cyan', no_wrap=True)
+    tbl.add_column('Earnings',   justify='right',  style='bright_cyan', no_wrap=True)
+    tbl.add_column('Analyst',    justify='right',  style='bright_cyan', no_wrap=True)
+
+    for rank, r in enumerate(passing, start=1):
+        score = r['edge_score']
+        c     = r['components']
+        score_color = (
+            'bright_green' if score >= 70
+            else 'bright_yellow' if score >= 50
+            else 'bright_red'
+        )
+        tbl.add_row(
+            str(rank),
+            r['ticker'],
+            f'[{score_color}]{score:.1f}[/{score_color}]',
+            _edge_score_bar(score),
+            f"{c.get('buffett',    50.0):.0f}",
+            f"{c.get('insider',    50.0):.0f}",
+            f"{c.get('politician', 50.0):.0f}",
+            f"{c.get('earnings',   50.0):.0f}",
+            f"{c.get('analyst',    50.0):.0f}",
+        )
+
+    console.print(tbl)
+
+    w_used = passing[0]['weights_used'] if passing else DEFAULT_WEIGHTS
+    weight_line = '  '.join(
+        f'[dim]{k}[/dim]=[bright_cyan]{v:.0%}[/bright_cyan]'
+        for k, v in w_used.items()
+    )
+    console.print(f'[dim]Weights:[/dim]  {weight_line}')
+    console.print(
+        f'[dim]{len(results)} scored  |  {len(passing)} passed min-edge {min_edge}  |  '
+        f'{"saved to DB" if save else "not saved"}[/dim]'
+    )

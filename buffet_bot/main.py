@@ -19,7 +19,7 @@ from buffet_bot.cmd_trading import (
 
 # ── Intel commands ────────────────────────────────────────────────────────────
 from buffet_bot.cmd_intel import (
-    news, insiders, crypto, volatile, options,
+    news, insiders, crypto, volatile, options, edge_scan,
 )
 
 # ── Portfolio commands ────────────────────────────────────────────────────────
@@ -65,6 +65,7 @@ cli.add_command(insiders)
 cli.add_command(crypto)
 cli.add_command(volatile)
 cli.add_command(options)
+cli.add_command(edge_scan)
 
 # Register portfolio commands
 cli.add_command(rebalance)

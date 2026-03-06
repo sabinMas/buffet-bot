@@ -223,6 +223,108 @@ def init_db():
     from buffet_bot.live_guard import init_live_audit_table
     init_live_audit_table()
     init_compound_tables()
+    init_edge_table()
+
+
+def init_edge_table() -> None:
+    """Create edge_scans table if it doesn't exist."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS edge_scans (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                scanned_at      TEXT    NOT NULL,
+                ticker          TEXT    NOT NULL,
+                edge_score      REAL    NOT NULL,
+                buffett_score   REAL    NOT NULL DEFAULT 50.0,
+                llm_score       REAL    NOT NULL DEFAULT 50.0,
+                insider_score   REAL    NOT NULL DEFAULT 50.0,
+                politician_score REAL   NOT NULL DEFAULT 50.0,
+                earnings_score  REAL    NOT NULL DEFAULT 50.0,
+                analyst_score   REAL    NOT NULL DEFAULT 50.0,
+                weights_json    TEXT    NOT NULL DEFAULT '{}',
+                simulation_date TEXT    NOT NULL DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS idx_edge_scans_ticker
+                ON edge_scans(ticker);
+            CREATE INDEX IF NOT EXISTS idx_edge_scans_scanned_at
+                ON edge_scans(scanned_at);
+        """)
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+def log_edge_scan(result: dict) -> int:
+    """Insert an edge_scans row from a compute_edge_score() result dict.
+    Returns new row id or 0 on error.
+    """
+    import json as _json
+    try:
+        c = result.get('components', {})
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.execute(
+            """INSERT INTO edge_scans
+               (scanned_at, ticker, edge_score,
+                buffett_score, llm_score, insider_score,
+                politician_score, earnings_score, analyst_score,
+                weights_json, simulation_date)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                datetime.now(timezone.utc).isoformat(),
+                result['ticker'],
+                result['edge_score'],
+                c.get('buffett',    50.0),
+                c.get('llm',        50.0),
+                c.get('insider',    50.0),
+                c.get('politician', 50.0),
+                c.get('earnings',   50.0),
+                c.get('analyst',    50.0),
+                _json.dumps(result.get('weights_used', {})),
+                result.get('simulation_date') or '',
+            ),
+        )
+        row_id = cur.lastrowid
+        conn.commit()
+        conn.close()
+        return row_id or 0
+    except Exception:
+        return 0
+
+
+def get_edge_history(ticker: str = '', days: int = 30, limit: int = 50) -> list[dict]:
+    """Return edge_scans rows. Filter by ticker and/or recency window."""
+    try:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        conn = sqlite3.connect(DB_PATH)
+        if ticker:
+            rows = conn.execute(
+                """SELECT ticker, scanned_at, edge_score,
+                          buffett_score, llm_score, insider_score,
+                          politician_score, earnings_score, analyst_score
+                   FROM edge_scans
+                   WHERE ticker = ? AND scanned_at >= ?
+                   ORDER BY scanned_at DESC LIMIT ?""",
+                (ticker.upper(), cutoff, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT ticker, scanned_at, edge_score,
+                          buffett_score, llm_score, insider_score,
+                          politician_score, earnings_score, analyst_score
+                   FROM edge_scans
+                   WHERE scanned_at >= ?
+                   ORDER BY scanned_at DESC LIMIT ?""",
+                (cutoff, limit),
+            ).fetchall()
+        conn.close()
+        cols = ['ticker', 'scanned_at', 'edge_score', 'buffett_score',
+                'llm_score', 'insider_score', 'politician_score',
+                'earnings_score', 'analyst_score']
+        return [dict(zip(cols, r)) for r in rows]
+    except Exception:
+        return []
 
 
 def log_recommendation(ticker, action, confidence, qty, entry_price,

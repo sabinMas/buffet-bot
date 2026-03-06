@@ -179,6 +179,15 @@ except ImportError:
 _CONFIG_DEFAULTS = {
     'defaults': {'model': MODELS[0], 'risk': 'medium', 'strategy': 'value'},
     'display':  {'buffett_score_green': 70, 'buffett_score_yellow': 40},
+    'edge': {
+        'min_score': 60,
+        'buffett_weight':    0.30,
+        'llm_weight':        0.20,
+        'insider_weight':    0.20,
+        'politician_weight': 0.10,
+        'earnings_weight':   0.10,
+        'analyst_weight':    0.10,
+    },
 }
 
 def _load_config():

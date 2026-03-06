@@ -397,3 +397,115 @@ class TestSweeps:
         monkeypatch.setattr('buffet_bot.db.DB_PATH', '/nonexistent/path/test.db')
         from buffet_bot.db import complete_sweep
         complete_sweep(999, 0, 0, 0.0, 'summary')  # must not raise
+
+
+# ── Edge scans ────────────────────────────────────────────────────────────────
+
+def _make_edge_result(ticker='AAPL', edge_score=72.5):
+    """Minimal compute_edge_score() result dict for DB helper tests."""
+    return {
+        'ticker':          ticker,
+        'edge_score':      edge_score,
+        'components':      {
+            'buffett':    80.0,
+            'llm':        70.0,
+            'insider':    65.0,
+            'politician': 60.0,
+            'earnings':   75.0,
+            'analyst':    68.0,
+        },
+        'weights_used':    {
+            'buffett': 0.30, 'llm': 0.20, 'insider': 0.20,
+            'politician': 0.10, 'earnings': 0.10, 'analyst': 0.10,
+        },
+        'simulation_date': None,
+    }
+
+
+class TestEdgeTable:
+    """Tests for init_edge_table(), log_edge_scan(), get_edge_history()."""
+
+    def test_creates_edge_scans_table(self, in_memory_db):
+        conn = sqlite3.connect(in_memory_db)
+        tables = {row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()}
+        conn.close()
+        assert 'edge_scans' in tables
+
+    def test_log_edge_scan_returns_positive_id(self, in_memory_db, monkeypatch):
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', in_memory_db)
+        from buffet_bot.db import log_edge_scan
+        row_id = log_edge_scan(_make_edge_result())
+        assert row_id > 0
+
+    def test_log_edge_scan_stores_ticker_and_score(self, in_memory_db, monkeypatch):
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', in_memory_db)
+        from buffet_bot.db import log_edge_scan
+        row_id = log_edge_scan(_make_edge_result('MSFT', 65.3))
+        conn = sqlite3.connect(in_memory_db)
+        row = conn.execute(
+            "SELECT ticker, edge_score FROM edge_scans WHERE id=?", (row_id,)
+        ).fetchone()
+        conn.close()
+        assert row[0] == 'MSFT'
+        assert abs(row[1] - 65.3) < 0.01
+
+    def test_log_edge_scan_stores_component_scores(self, in_memory_db, monkeypatch):
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', in_memory_db)
+        from buffet_bot.db import log_edge_scan
+        result = _make_edge_result()
+        row_id = log_edge_scan(result)
+        conn = sqlite3.connect(in_memory_db)
+        row = conn.execute(
+            "SELECT buffett_score, insider_score, politician_score, "
+            "       earnings_score, analyst_score "
+            "FROM edge_scans WHERE id=?", (row_id,)
+        ).fetchone()
+        conn.close()
+        assert abs(row[0] - 80.0) < 0.01   # buffett
+        assert abs(row[1] - 65.0) < 0.01   # insider
+        assert abs(row[2] - 60.0) < 0.01   # politician
+        assert abs(row[3] - 75.0) < 0.01   # earnings
+        assert abs(row[4] - 68.0) < 0.01   # analyst
+
+    def test_get_edge_history_returns_rows(self, in_memory_db, monkeypatch):
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', in_memory_db)
+        from buffet_bot.db import log_edge_scan, get_edge_history
+        log_edge_scan(_make_edge_result('AAPL', 70.0))
+        log_edge_scan(_make_edge_result('MSFT', 80.0))
+        rows = get_edge_history()
+        assert len(rows) == 2
+
+    def test_get_edge_history_filters_by_ticker(self, in_memory_db, monkeypatch):
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', in_memory_db)
+        from buffet_bot.db import log_edge_scan, get_edge_history
+        log_edge_scan(_make_edge_result('AAPL', 70.0))
+        log_edge_scan(_make_edge_result('MSFT', 80.0))
+        rows = get_edge_history(ticker='AAPL')
+        assert len(rows) == 1
+        assert rows[0]['ticker'] == 'AAPL'
+
+    def test_get_edge_history_respects_limit(self, in_memory_db, monkeypatch):
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', in_memory_db)
+        from buffet_bot.db import log_edge_scan, get_edge_history
+        for i in range(5):
+            log_edge_scan(_make_edge_result('AAPL', float(i * 10)))
+        rows = get_edge_history(ticker='AAPL', limit=3)
+        assert len(rows) == 3
+
+    def test_get_edge_history_empty_returns_empty_list(self, in_memory_db, monkeypatch):
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', in_memory_db)
+        from buffet_bot.db import get_edge_history
+        assert get_edge_history() == []
+
+    def test_log_edge_scan_silent_on_bad_db(self, monkeypatch):
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', '/nonexistent/path/test.db')
+        from buffet_bot.db import log_edge_scan
+        result = log_edge_scan(_make_edge_result())
+        assert result == 0  # returns 0, does not raise
+
+    def test_get_edge_history_silent_on_bad_db(self, monkeypatch):
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', '/nonexistent/path/test.db')
+        from buffet_bot.db import get_edge_history
+        assert get_edge_history() == []
