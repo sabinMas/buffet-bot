@@ -219,3 +219,181 @@ class TestWatchlist:
         rows = get_watchlist()
         assert 'ticker' in rows[0]
         assert 'added_at' in rows[0]
+
+
+# ── compound_log helpers ──────────────────────────────────────────────────────
+
+class TestCompoundLog:
+    """Tests for log_compound_event() and get_compound_history()."""
+
+    def test_creates_compound_log_table(self, in_memory_db):
+        conn = sqlite3.connect(in_memory_db)
+        tables = {row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()}
+        conn.close()
+        assert 'compound_log' in tables
+
+    def test_log_event_returns_positive_id(self, in_memory_db, monkeypatch):
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', in_memory_db)
+        from buffet_bot.db import log_compound_event
+        row_id = log_compound_event(
+            source='DIVIDEND', ticker='AAPL', amount_usd=50.0,
+            allocated_to=[{'ticker': 'KO', 'qty': 1, 'price': 60.0}],
+        )
+        assert row_id > 0
+
+    def test_log_event_calculates_total_deployed(self, in_memory_db, monkeypatch):
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', in_memory_db)
+        from buffet_bot.db import log_compound_event, get_compound_history
+        log_compound_event(
+            source='DIVIDEND', ticker='AAPL', amount_usd=200.0,
+            allocated_to=[
+                {'ticker': 'KO',  'qty': 2, 'price': 60.0},
+                {'ticker': 'JNJ', 'qty': 1, 'price': 50.0},
+            ],
+        )
+        rows = get_compound_history(days=7)
+        assert len(rows) == 1
+        assert abs(rows[0]['total_deployed'] - 170.0) < 0.01  # 2*60 + 1*50
+        assert abs(rows[0]['undeployed']    -  30.0) < 0.01  # 200 - 170
+
+    def test_log_event_stores_source_uppercased(self, in_memory_db, monkeypatch):
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', in_memory_db)
+        from buffet_bot.db import log_compound_event, get_compound_history
+        log_compound_event('dividend', 'AAPL', 50.0, [])
+        rows = get_compound_history()
+        assert rows[0]['source'] == 'DIVIDEND'
+
+    def test_log_event_allocated_to_is_deserialized_list(self, in_memory_db, monkeypatch):
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', in_memory_db)
+        from buffet_bot.db import log_compound_event, get_compound_history
+        allocation = [{'ticker': 'V', 'qty': 3, 'price': 250.0}]
+        log_compound_event('MANUAL', 'CASH', 750.0, allocation)
+        rows = get_compound_history()
+        assert isinstance(rows[0]['allocated_to'], list)
+        assert rows[0]['allocated_to'][0]['ticker'] == 'V'
+
+    def test_get_compound_history_respects_days_window(self, in_memory_db, monkeypatch):
+        """A row older than the window must not be returned."""
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', in_memory_db)
+        from buffet_bot.db import get_compound_history
+        # Insert a backdated row directly
+        old_ts = (datetime.now(timezone.utc) - timedelta(days=100)).isoformat()
+        conn = sqlite3.connect(in_memory_db)
+        conn.execute(
+            "INSERT INTO compound_log (timestamp, source, ticker, amount_usd, allocated_to) "
+            "VALUES (?, 'DIVIDEND', 'AAPL', 100.0, '[]')",
+            (old_ts,),
+        )
+        conn.commit()
+        conn.close()
+        rows = get_compound_history(days=30)
+        assert len(rows) == 0
+
+    def test_get_compound_history_empty_returns_empty_list(self, in_memory_db, monkeypatch):
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', in_memory_db)
+        from buffet_bot.db import get_compound_history
+        assert get_compound_history() == []
+
+    def test_get_compound_history_bad_db_returns_empty_list(self, monkeypatch):
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', '/nonexistent/path/test.db')
+        from buffet_bot.db import get_compound_history
+        assert get_compound_history() == []
+
+    def test_log_event_silent_on_bad_db(self, monkeypatch):
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', '/nonexistent/path/test.db')
+        from buffet_bot.db import log_compound_event
+        result = log_compound_event('DIVIDEND', 'AAPL', 50.0, [])
+        assert result == 0  # returns 0, does not raise
+
+
+# ── sweeps helpers ────────────────────────────────────────────────────────────
+
+class TestSweeps:
+    """Tests for create_sweep(), complete_sweep(), get_sweep_history()."""
+
+    def test_creates_sweeps_table(self, in_memory_db):
+        conn = sqlite3.connect(in_memory_db)
+        tables = {row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()}
+        conn.close()
+        assert 'sweeps' in tables
+
+    def test_create_sweep_returns_positive_id(self, in_memory_db, monkeypatch):
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', in_memory_db)
+        from buffet_bot.db import create_sweep
+        sweep_id = create_sweep(goal='invest $500 in value stocks', budget_usd=500.0)
+        assert sweep_id > 0
+
+    def test_create_sweep_status_is_running(self, in_memory_db, monkeypatch):
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', in_memory_db)
+        from buffet_bot.db import create_sweep
+        sweep_id = create_sweep(goal='test', budget_usd=100.0)
+        conn = sqlite3.connect(in_memory_db)
+        row = conn.execute("SELECT status FROM sweeps WHERE id=?", (sweep_id,)).fetchone()
+        conn.close()
+        assert row[0] == 'RUNNING'
+
+    def test_complete_sweep_updates_status(self, in_memory_db, monkeypatch):
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', in_memory_db)
+        from buffet_bot.db import create_sweep, complete_sweep
+        sweep_id = create_sweep(goal='test', budget_usd=100.0)
+        complete_sweep(sweep_id, tickers_scanned=10, orders_placed=2,
+                       total_deployed=180.0, summary='Bought KO and JNJ')
+        conn = sqlite3.connect(in_memory_db)
+        row = conn.execute(
+            "SELECT status, tickers_scanned, orders_placed, total_deployed, summary "
+            "FROM sweeps WHERE id=?", (sweep_id,)
+        ).fetchone()
+        conn.close()
+        assert row[0] == 'COMPLETE'
+        assert row[1] == 10
+        assert row[2] == 2
+        assert abs(row[3] - 180.0) < 0.01
+        assert 'KO' in row[4]
+
+    def test_complete_sweep_can_mark_failed(self, in_memory_db, monkeypatch):
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', in_memory_db)
+        from buffet_bot.db import create_sweep, complete_sweep
+        sweep_id = create_sweep(goal='test', budget_usd=100.0)
+        complete_sweep(sweep_id, tickers_scanned=3, orders_placed=0,
+                       total_deployed=0.0, summary='timeout', status='FAILED')
+        conn = sqlite3.connect(in_memory_db)
+        row = conn.execute("SELECT status FROM sweeps WHERE id=?", (sweep_id,)).fetchone()
+        conn.close()
+        assert row[0] == 'FAILED'
+
+    def test_get_sweep_history_returns_newest_first(self, in_memory_db, monkeypatch):
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', in_memory_db)
+        from buffet_bot.db import create_sweep, get_sweep_history
+        id1 = create_sweep(goal='first', budget_usd=100.0)
+        id2 = create_sweep(goal='second', budget_usd=200.0)
+        rows = get_sweep_history()
+        assert rows[0]['id'] == id2  # newest first
+        assert rows[1]['id'] == id1
+
+    def test_get_sweep_history_respects_limit(self, in_memory_db, monkeypatch):
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', in_memory_db)
+        from buffet_bot.db import create_sweep, get_sweep_history
+        for i in range(5):
+            create_sweep(goal=f'sweep {i}', budget_usd=100.0)
+        rows = get_sweep_history(limit=3)
+        assert len(rows) == 3
+
+    def test_get_sweep_history_empty_returns_empty_list(self, in_memory_db, monkeypatch):
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', in_memory_db)
+        from buffet_bot.db import get_sweep_history
+        assert get_sweep_history() == []
+
+    def test_create_sweep_silent_on_bad_db(self, monkeypatch):
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', '/nonexistent/path/test.db')
+        from buffet_bot.db import create_sweep
+        result = create_sweep(goal='test', budget_usd=100.0)
+        assert result == 0  # returns 0, does not raise
+
+    def test_complete_sweep_silent_on_bad_db(self, monkeypatch):
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', '/nonexistent/path/test.db')
+        from buffet_bot.db import complete_sweep
+        complete_sweep(999, 0, 0, 0.0, 'summary')  # must not raise

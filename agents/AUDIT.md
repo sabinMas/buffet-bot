@@ -1,12 +1,14 @@
 # Structural Audit — Buffet-Bot
 
 > Owned by: Architect Agent
-> Last audited: 2026-02-28
+> Last audited: 2026-02-28 (original) — superseded note added 2026-03-06
 > Audited against: `buffet_bot/main.py` (2760 lines), v0.4.0
+
+> **NOTE (2026-03-06, Architect session 16):** The monolith was split in session 10 into 13 focused modules. The summary metrics below are now historical. Current structure is documented in the "Module Health" section further down — updated here. All D-00x debt items from the original audit were resolved during sessions 6–10 (D-001 asyncio removed, D-004 crypto migrated, D-006 split executed). The main entry point `main.py` is now a 97-line slim dispatcher.
 
 ---
 
-## Summary
+## Summary (historical — v0.4.0 pre-split)
 
 | Metric | Value | Threshold | Status |
 |--------|-------|-----------|--------|
@@ -108,12 +110,39 @@ When the line count crosses 3000, the following splits are pre-approved for prop
 
 ## Module Health: Sub-Modules
 
+> Updated 2026-03-06 by Architect Agent (session 16) to reflect post-split state.
+
 | Module | Exists? | Clean separation? | Notes |
 |--------|---------|------------------|-------|
-| `crypto.py` | ✅ | Partial — `_analyze_crypto` still in main.py | See D-004 |
-| `politicians.py` | ✅ | ✅ | Clean |
-| `volatile.py` | ✅ | ✅ | Clean |
-| `ibkr.py` | ✅ | ✅ | Clean |
+| `globals.py` | ✅ | ✅ | Constants, API clients, config, theme, LIVE_MODE |
+| `db.py` | ✅ | ✅ | SQLite helpers; calls `init_live_audit_table()` from `live_guard` |
+| `data.py` | ✅ | ✅ | yfinance fetchers, FRED macro, multiframe signals, analyst consensus |
+| `analysis.py` | ✅ | ✅ | `_run_analysis()`, LLM querying, Buffett scoring, news sentiment |
+| `backtest.py` | ✅ | ✅ | `_run_backtest()`, RSI strategy, SPY benchmark |
+| `risk.py` | ✅ | ✅ | `_get_atr()`, `_calculate_position_size()`, VaR |
+| `projections.py` | ✅ | ✅ | Monte Carlo, `_calculate_future_value()` |
+| `plans.py` | ✅ | ✅ | Investment plan save/load/schedule, wired with `confirm_live_execution` |
+| `display.py` | ✅ | ✅ | Shared Rich display helpers |
+| `cmd_trading.py` | ✅ | ✅ | analyze, buy, scan, status, compare, explain, SPY benchmark overlay |
+| `cmd_intel.py` | ✅ | ✅ | news, insiders, crypto (display), volatile, options |
+| `cmd_portfolio.py` | ✅ | ✅ | rebalance, backtest, sectors, var, forecast, whatif, scenarios, milestones |
+| `cmd_account.py` | ✅ | ✅ | guide, plans, automate, config, alerts, watchlist, beats, completion |
+| `live_guard.py` | ✅ | ✅ | Triple-confirmation safety layer; `live_audit` table; **untracked in git — needs `git add`** |
+| `crypto.py` | ✅ | ✅ | `_analyze_crypto` migrated here (D-004 resolved); wired with `confirm_live_execution` |
+| `politicians.py` | ✅ | ✅ | House Stock Watcher S3 + FMP API |
+| `volatile.py` | ✅ | ✅ | 75-ticker universe volatility scanner |
+| `ibkr.py` | ✅ | ✅ | IBKR EWrapper/EClient sync wrapper |
+| `automate.py` | ✅ | ✅ | ReAct agent loop (no circular imports — injected dependencies) |
+| `universe.py` | ✅ | ✅ | 366-company DB across 11 GICS sectors |
+| `insiders.py` | ✅ | ✅ | SEC EDGAR Form 4 fetcher |
+
+### Planned Modules (architecture designed, ENG not started)
+
+| Module | ADR | Blocks |
+|--------|-----|--------|
+| `edge.py` | ADR-013 | v0.7.0 ENG items, `options_engine.py` CSP filter |
+| `options_engine.py` | ADR-014 | v0.8.0 ENG items |
+| `macro.py` | ADR-015 | v0.9.0 ENG items |
 
 ---
 
@@ -196,7 +225,9 @@ Or use `time python buffet-bot.py analyze AAPL` for a coarse measurement.
 ## Next Audit Trigger
 
 Re-run this audit when:
-- `main.py` exceeds 3000 lines
+- Any module exceeds 600 lines (current largest: `cmd_trading.py`, estimated ~500 lines)
 - Any single domain function exceeds 150 lines
-- The ENG adds a new sub-module
-- A new v0.5.0 feature is scoped that adds >200 lines
+- `edge.py`, `options_engine.py`, or `macro.py` are implemented (add them to the module health table)
+- A v0.7.0 ENG session adds `edge_scans` table or modifies `analysis.py` fan-out
+
+**A full re-audit is NOT needed for v0.5.0 → v0.6.0 ENG work** (compound tables are additive to `db.py`; `compound` command adds to `cmd_portfolio.py`).  Trigger a re-audit at v0.7.0 milestone when `edge.py` lands.

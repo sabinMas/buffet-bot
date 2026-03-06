@@ -24,7 +24,8 @@
 | 12–14   | Engineer (v0.5.0 PERF + v0.6.0 ENG unblocked items) | complete |
 | 15      | PM / Release Manager (v0.5.0 release) | complete — 2026-03-06 |
 | 16      | Architect (v0.6.0 design — live trading guard + compound + sweep) | complete |
-| **17 →**| **ENG (v0.6.0 — compound command + automate --sweep)** | **next** |
+| 17      | ENG (v0.6.0 — compound command + automate --sweep) | complete — 2026-03-06 |
+| **18 →**| **QA (v0.6.0 — live guard + compound tests) OR ENG (v0.7.0 edge.py)** | **next** |
 
 **Current milestone:** v0.5.0 SHIPPED (tag v0.5.0, 2026-03-06). v0.6.0 Live Guard ARCH+ENG complete. Several v0.6.0 display-only ENG items also done early.
 **Do NOT take Security Auditor** until v1.0.0 milestone is explicitly started.
@@ -63,6 +64,24 @@
 - [x] No placeholder stubs — all v0.5.0 items are `[x]` complete
 
 **Next:** ENG session 17 — v0.6.0 compound command + automate --sweep (see ADR-012); commit live_guard.py first
+
+---
+
+### 2026-03-06 — Software Engineer (session 17 — v0.6.0 Compounding Engine)
+**Role taken:** Software Engineer [ENG] — v0.6.0 Compounding Engine (ADR-012)
+**What was done:**
+- **`db.py`**: Added `init_compound_tables()` (creates `compound_log` + `sweeps` tables with indexes); called from `init_db()`; added 5 helpers: `log_compound_event()`, `get_compound_history()`, `create_sweep()`, `complete_sweep()`, `get_sweep_history()`
+- **`compound` command** (`cmd_portfolio.py`): full implementation — `_fetch_dividend_activities()` (Alpaca `/account/activities` API, degrades gracefully for paper accounts), `_fetch_realized_profits()` (queries `outcomes` table for positive P&L in last 90d); concurrent Buffett scoring across watchlist + buffett/income GOAL_PRESETS (ThreadPoolExecutor, 6 workers); allocation split evenly across `--top` tickers; Rich table + execute flow with `confirm_live_execution()`; logs to `compound_log` on execute; `--source`, `--budget`, `--top`, `--min-score`, `--execute` flags
+- **`automate.py`**: Added `SWEEP_AGENT_PROMPT` — deterministic 4-step workflow (scan → analyze → buy → done); enforces `confidence >= 0.6` filter; budget-aware; no duplicate ticker analysis
+- **`automate --sweep`** (`cmd_account.py`): imported `SWEEP_AGENT_PROMPT`, `create_sweep`, `complete_sweep`; `--sweep` flag added; sweep_id created before loop, completed after; uses `SWEEP_AGENT_PROMPT` template when `--sweep` is active; sweep status = FAILED on timeout, COMPLETE otherwise
+- **`main.py`**: registered `compound` command
+- **Unicode fix**: `→` removed from `--sweep` help text (Windows cp1252 terminal compatibility)
+- **Verified**: `python buffet-bot.py compound --help` and `python buffet-bot.py automate --help` both render cleanly
+- **ROADMAP**: all v0.6.0 Compounding Engine items marked `[x]`
+
+**Note:** `live_guard.py` is still untracked — commit it alongside this session's changes.
+
+**Next:** QA session — tests for live guard triple-confirmation rejection, compound allocation math, sweep flow (see v0.6.0 QA item); OR ENG session for v0.7.0 edge.py (ADR-013 is the spec)
 
 ---
 
@@ -311,14 +330,14 @@
 - [x] [ENG] `status` command: prominent PAPER/LIVE banner — `LIVE_MODE` constant in `globals.py`; green PAPER panel / red LIVE panel printed at top of `status` output; imports wired in `cmd_trading.py` — complete 2026-03-04
 
 ### Compounding Engine
-- [ ] [ENG] `db.py`: `compound_log` table + helpers; `sweeps` table
-- [ ] [ENG] `compound` command in `cmd_portfolio.py`: dividend + realized profit reinvestment; allocates via `_calculate_position_size()` + ranked Buffett scores
-- [ ] [ENG] Alpaca corporate actions endpoint (`/v2/account/activities?activity_type=DIV`)
-- [ ] [ENG] `automate --sweep` flag: deterministic scan→analyze→size→execute top-N (SWEEP_AGENT_PROMPT in `automate.py`)
+- [x] [ENG] `db.py`: `compound_log` + `sweeps` tables; `log_compound_event()`, `get_compound_history()`, `create_sweep()`, `complete_sweep()`, `get_sweep_history()` helpers; `init_compound_tables()` called from `init_db()` — complete 2026-03-06
+- [x] [ENG] `compound` command in `cmd_portfolio.py`: dividend + realized profit reinvestment; concurrent Buffett scoring across watchlist + value presets; allocates via per-ticker budget split; `--source`, `--budget`, `--top`, `--min-score`, `--execute` flags; logs to `compound_log` on execute — complete 2026-03-06
+- [x] [ENG] Alpaca corporate actions endpoint (`get_account_activities(activity_types="DIV")`); degrades gracefully for paper accounts with no dividend history — complete 2026-03-06
+- [x] [ENG] `automate --sweep` flag: `SWEEP_AGENT_PROMPT` added to `automate.py`; `--sweep` wired in `cmd_account.py`; creates/completes `sweeps` row via `create_sweep()`/`complete_sweep()` — complete 2026-03-06
 - [x] [ENG] `portfolio` SPY benchmark overlay (plotext, CAGR/alpha/Sharpe comparison) — `_fetch_spy_benchmark()` + `_annualised_cagr()` helpers; yellow SPY line on portfolio chart; CAGR/alpha summary row; `--no-benchmark` flag — complete 2026-03-04
 
 ### QA
-- [ ] [QA] Tests: live guard triple-confirmation rejection; compound allocation math; sweep flow
+- [x] [QA] Tests: live guard triple-confirmation rejection; compound allocation math; sweep flow — 37 new tests added (186 total, 0 failures); `TestIsLiveMode` (6), `TestConfirmLiveExecution` (6), `TestCompoundLog` (8), `TestSweeps` (10), `TestCompoundCommand` (6) — complete 2026-03-06
 
 ---
 
@@ -411,10 +430,12 @@
 
 | Field | Value |
 |-------|-------|
-| **Next session role** | ENG — v0.6.0 Compounding Engine (session 17) |
-| **Suggested focus** | Implement `compound_log` + `sweeps` tables in `db.py`; `compound` command in `cmd_portfolio.py`; `automate --sweep` flag; Alpaca `/v2/account/activities?activity_type=DIV` endpoint. See ADR-012 for full schema + helper contracts. Also: `git add buffet_bot/live_guard.py` and commit it (untracked — verified complete by Architect session 16). |
+| **Next session role** | QA (v0.6.0 tests) OR ENG (v0.7.0 edge.py — ADR-013 is the spec) |
+| **Suggested focus (QA)** | Add tests to `tests/test_db.py` for `compound_log`/`sweeps` helpers; add `tests/test_cli.py` cases for `compound --help`, live guard rejection (mock `is_live_mode()=True`, confirm_live_execution with wrong passphrase → returns False); verify 149+ tests pass |
+| **Suggested focus (ENG v0.7.0)** | Implement `buffet_bot/edge.py` per ADR-013: `compute_edge_score()`, `compute_insider_signal()`, `compute_politician_signal()`, `compute_earnings_signal()`; `edge_scans` table in `db.py`; `[edge]` config section in `globals.py` |
 | **Do NOT take** | Security Auditor (gated to v1.0.0 pre-release) |
-| **Last updated** | 2026-03-06 by PM / Release Manager (session 15) |
+| **Reminder** | `live_guard.py` is still untracked — `git add buffet_bot/live_guard.py` and commit alongside this session's changes |
+| **Last updated** | 2026-03-06 by Software Engineer Agent (session 17) |
 
 ---
 

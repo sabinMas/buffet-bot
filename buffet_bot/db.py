@@ -5,6 +5,168 @@ from datetime import datetime, timezone, timedelta
 from buffet_bot.globals import DB_PATH
 
 
+def init_compound_tables() -> None:
+    """Create compound_log and sweeps tables if they don't exist."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS compound_log (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp       TEXT    NOT NULL,
+                source          TEXT    NOT NULL,
+                ticker          TEXT    NOT NULL,
+                amount_usd      REAL    NOT NULL,
+                allocated_to    TEXT    NOT NULL,
+                total_deployed  REAL    NOT NULL DEFAULT 0.0,
+                undeployed      REAL    NOT NULL DEFAULT 0.0,
+                notes           TEXT    NOT NULL DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS idx_compound_log_timestamp
+                ON compound_log(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_compound_log_source
+                ON compound_log(source);
+
+            CREATE TABLE IF NOT EXISTS sweeps (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                started_at      TEXT    NOT NULL,
+                completed_at    TEXT    NOT NULL DEFAULT '',
+                goal            TEXT    NOT NULL,
+                budget_usd      REAL    NOT NULL,
+                tickers_scanned INTEGER NOT NULL DEFAULT 0,
+                orders_placed   INTEGER NOT NULL DEFAULT 0,
+                total_deployed  REAL    NOT NULL DEFAULT 0.0,
+                summary         TEXT    NOT NULL DEFAULT '',
+                status          TEXT    NOT NULL DEFAULT 'RUNNING'
+            );
+        """)
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+def log_compound_event(source: str, ticker: str, amount_usd: float,
+                       allocated_to: list) -> int:
+    """Insert a compound_log row. Returns new row id or 0 on error."""
+    import json as _json
+    try:
+        total_deployed = sum(a.get('qty', 0) * a.get('price', 0) for a in allocated_to)
+        undeployed = max(0.0, amount_usd - total_deployed)
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.execute(
+            """INSERT INTO compound_log
+               (timestamp, source, ticker, amount_usd, allocated_to,
+                total_deployed, undeployed)
+               VALUES (?,?,?,?,?,?,?)""",
+            (
+                datetime.now(timezone.utc).isoformat(),
+                source.upper(),
+                ticker.upper(),
+                round(float(amount_usd), 2),
+                _json.dumps(allocated_to),
+                round(float(total_deployed), 2),
+                round(float(undeployed), 2),
+            ),
+        )
+        row_id = cur.lastrowid
+        conn.commit()
+        conn.close()
+        return row_id or 0
+    except Exception:
+        return 0
+
+
+def get_compound_history(days: int = 90) -> list[dict]:
+    """Return compound_log rows within the last N days, newest first."""
+    import json as _json
+    try:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        conn = sqlite3.connect(DB_PATH)
+        rows = conn.execute(
+            """SELECT id, timestamp, source, ticker, amount_usd,
+                      allocated_to, total_deployed, undeployed, notes
+               FROM compound_log WHERE timestamp >= ?
+               ORDER BY timestamp DESC""",
+            (cutoff,),
+        ).fetchall()
+        conn.close()
+        cols = ['id', 'timestamp', 'source', 'ticker', 'amount_usd',
+                'allocated_to', 'total_deployed', 'undeployed', 'notes']
+        result = []
+        for row in rows:
+            d = dict(zip(cols, row))
+            try:
+                d['allocated_to'] = _json.loads(d['allocated_to'])
+            except Exception:
+                d['allocated_to'] = []
+            result.append(d)
+        return result
+    except Exception:
+        return []
+
+
+def create_sweep(goal: str, budget_usd: float) -> int:
+    """Insert a sweeps row with status=RUNNING. Returns new row id or 0."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.execute(
+            "INSERT INTO sweeps (started_at, goal, budget_usd, status) VALUES (?,?,?,?)",
+            (datetime.now(timezone.utc).isoformat(), goal,
+             round(float(budget_usd), 2), 'RUNNING'),
+        )
+        row_id = cur.lastrowid
+        conn.commit()
+        conn.close()
+        return row_id or 0
+    except Exception:
+        return 0
+
+
+def complete_sweep(sweep_id: int, tickers_scanned: int, orders_placed: int,
+                   total_deployed: float, summary: str,
+                   status: str = 'COMPLETE') -> None:
+    """Update a sweeps row to COMPLETE or FAILED."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute(
+            """UPDATE sweeps
+               SET completed_at=?, tickers_scanned=?, orders_placed=?,
+                   total_deployed=?, summary=?, status=?
+               WHERE id=?""",
+            (
+                datetime.now(timezone.utc).isoformat(),
+                int(tickers_scanned),
+                int(orders_placed),
+                round(float(total_deployed), 2),
+                str(summary)[:1000],
+                status.upper(),
+                int(sweep_id),
+            ),
+        )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+def get_sweep_history(limit: int = 20) -> list[dict]:
+    """Return recent sweep rows, newest first."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        rows = conn.execute(
+            """SELECT id, started_at, completed_at, goal, budget_usd,
+                      tickers_scanned, orders_placed, total_deployed, summary, status
+               FROM sweeps ORDER BY started_at DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        conn.close()
+        cols = ['id', 'started_at', 'completed_at', 'goal', 'budget_usd',
+                'tickers_scanned', 'orders_placed', 'total_deployed', 'summary', 'status']
+        return [dict(zip(cols, r)) for r in rows]
+    except Exception:
+        return []
+
+
 def init_db():
     """Create recommendation/outcome tables if they don't exist."""
     conn = sqlite3.connect(DB_PATH)
@@ -60,6 +222,7 @@ def init_db():
     conn.close()
     from buffet_bot.live_guard import init_live_audit_table
     init_live_audit_table()
+    init_compound_tables()
 
 
 def log_recommendation(ticker, action, confidence, qty, entry_price,

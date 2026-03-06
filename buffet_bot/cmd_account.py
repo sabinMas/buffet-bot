@@ -38,7 +38,8 @@ from buffet_bot.plans import (
     _is_plan_due, _set_plan_schedule, _mark_plan_ran,
     _run_guide_plan, _guide_single_stock, _guide_build_plan, _guide_load_plan,
 )
-from buffet_bot.automate import run_agent_loop
+from buffet_bot.automate import run_agent_loop, SWEEP_AGENT_PROMPT
+from buffet_bot.db import create_sweep, complete_sweep, get_sweep_history
 from buffet_bot.universe import list_companies, search_companies
 
 
@@ -426,7 +427,9 @@ def _build_automate_tools(execute: bool, budget: float, primary_model: str, risk
               help='Investing strategy. Prompted if omitted in wizard mode.')
 @click.option('--speculative', 'speculative', is_flag=True, default=False,
               help='Enable speculative/volatile stock scanning (penny stocks, high-beta, short-squeeze candidates).')
-def automate(goal, execute, budget, max_steps, primary_model, risk, strategy, speculative):
+@click.option('--sweep', 'sweep', is_flag=True, default=False,
+              help='Deterministic sweep mode: scan > rank > size > execute top-N. Logged to sweeps table.')
+def automate(goal, execute, budget, max_steps, primary_model, risk, strategy, speculative, sweep):
     """AI agent that autonomously chains buffet-bot tools to accomplish a goal.
 
     \b
@@ -481,12 +484,23 @@ def automate(goal, execute, budget, max_steps, primary_model, risk, strategy, sp
     tools = _build_automate_tools(execute=execute, budget=budget, primary_model=primary_model,
                                    risk=risk, strategy=strategy, speculative=speculative)
 
+    sweep_id = 0
+    if sweep:
+        if not goal:
+            goal = (
+                f"Sweep the top value stocks. Invest up to ${budget:.2f} using a "
+                f"{risk}-risk {strategy} strategy by scanning, analyzing, and buying the best opportunities."
+            )
+        sweep_id = create_sweep(goal=goal, budget_usd=budget)
+
+    mode_label = "[bold bright_red]SWEEP[/bold bright_red]" if sweep else \
+                 ('[green]EXECUTE[/green]' if execute else '[yellow]DRY RUN[/yellow]')
     console.print(Panel(
         f"[bold]Goal:[/bold] {goal}\n"
         f"[bold]Budget:[/bold] ${budget:,.2f}  "
         f"[bold]Risk:[/bold] {risk}  "
         f"[bold]Strategy:[/bold] {strategy}  "
-        f"[bold]Mode:[/bold] {'[green]EXECUTE[/green]' if execute else '[yellow]DRY RUN[/yellow]'}  "
+        f"[bold]Mode:[/bold] {mode_label}  "
         f"[bold]Max steps:[/bold] {max_steps}  "
         f"[bold]Model:[/bold] {primary_model}",
         title="[bold cyan]Buffet-Bot Automate[/bold cyan]",
@@ -504,7 +518,22 @@ def automate(goal, execute, budget, max_steps, primary_model, risk, strategy, sp
         ollama_module=_ollama,
         risk=risk,
         strategy=strategy,
+        system_prompt_template=SWEEP_AGENT_PROMPT if sweep else None,
     )
+
+    if sweep and sweep_id:
+        # Count orders placed by inspecting tool results would require deep parsing;
+        # use summary string as best-effort and mark complete.
+        complete_sweep(
+            sweep_id=sweep_id,
+            tickers_scanned=result.get('steps_taken', 0),
+            orders_placed=0,  # ENG-TODO: instrument buy_stock tool to count orders
+            total_deployed=0.0,
+            summary=result.get('summary', ''),
+            status='FAILED' if result.get('timed_out') else 'COMPLETE',
+        )
+        console.print(f"[dim]Sweep #{sweep_id} logged.[/dim]")
+
     if result.get('timed_out'):
         console.print(
             f"[yellow]Agent stopped after {max_steps} steps without calling done().[/yellow]"

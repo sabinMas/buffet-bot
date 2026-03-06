@@ -1,5 +1,7 @@
-"""CLI commands: rebalance, backtest, correlate, check_sells, var, forecast, whatif, scenarios, milestones, sectors."""
+"""CLI commands: rebalance, backtest, correlate, check_sells, var, forecast, whatif, scenarios, milestones, sectors, compound."""
 import itertools
+import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 
 import click
@@ -14,18 +16,23 @@ from rich.prompt import Prompt
 from rich.table import Table
 from rich import box
 
-from buffet_bot.globals import console, MODELS, trading_client, LIVE_MODE
+from buffet_bot.globals import console, MODELS, trading_client, LIVE_MODE, GOAL_PRESETS
 from buffet_bot.live_guard import confirm_live_execution
-from buffet_bot.data import _complete_ticker
+from buffet_bot.data import _complete_ticker, get_buffett_metrics, get_realtime_data
 from buffet_bot.display import _score_color, _make_panel_title
 from buffet_bot.risk import (
     _check_sell_signals, _show_sector_table, _calculate_portfolio_var,
+    _calculate_position_size,
 )
 from buffet_bot.projections import (
     _calculate_future_value, _get_portfolio_expected_return, _get_ai_expected_return,
     _run_monte_carlo, _display_mc_chart, _years_to_reach,
 )
 from buffet_bot.backtest import _run_backtest
+from buffet_bot.db import (
+    log_compound_event, get_compound_history,
+    get_watchlist,
+)
 
 
 @click.command()
@@ -832,3 +839,284 @@ def sectors(show_chart):
             plt.show()
         except Exception as e:
             console.print(f"[dim]Chart unavailable: {e}[/dim]")
+
+
+# ── compound ──────────────────────────────────────────────────────────────────
+
+def _fetch_dividend_activities() -> list[dict]:
+    """Fetch recent dividend activities from Alpaca. Returns list of dicts."""
+    try:
+        activities = trading_client.get_account_activities(activity_types="DIV")
+        result = []
+        for act in (activities or []):
+            try:
+                result.append({
+                    'ticker': getattr(act, 'symbol', ''),
+                    'amount': float(getattr(act, 'net_amount', 0) or 0),
+                    'date':   str(getattr(act, 'date', '')),
+                    'type':   'DIVIDEND',
+                })
+            except Exception:
+                continue
+        return [r for r in result if r['amount'] > 0]
+    except Exception:
+        return []
+
+
+def _fetch_realized_profits(days: int = 90) -> list[dict]:
+    """Aggregate positive realized P&L from the outcomes table."""
+    import sqlite3
+    from buffet_bot.globals import DB_PATH
+    try:
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+        conn = sqlite3.connect(DB_PATH)
+        rows = conn.execute(
+            """SELECT r.ticker, o.pnl_pct, r.entry_price, r.qty, o.exit_timestamp
+               FROM outcomes o JOIN recommendations r ON o.recommendation_id = r.id
+               WHERE o.pnl_pct > 0 AND o.exit_timestamp >= ?
+               ORDER BY o.exit_timestamp DESC""",
+            (cutoff,),
+        ).fetchall()
+        conn.close()
+        result = []
+        for ticker, pnl_pct, entry_price, qty, exit_ts in rows:
+            profit = entry_price * qty * (pnl_pct / 100)
+            if profit > 0:
+                result.append({
+                    'ticker': ticker,
+                    'amount': round(profit, 2),
+                    'date':   exit_ts[:10] if exit_ts else '',
+                    'type':   'REALIZED_PROFIT',
+                })
+        return result
+    except Exception:
+        return []
+
+
+@click.command()
+@click.option('--source', default='all',
+              type=click.Choice(['dividends', 'profits', 'all']),
+              show_default=True,
+              help='Income source to reinvest.')
+@click.option('--budget', default=None, type=float,
+              help='Override maximum dollars to reinvest (default: all available income).')
+@click.option('--top', default=5, show_default=True, type=int,
+              help='Number of top Buffett-scored tickers to allocate across.')
+@click.option('--execute', is_flag=True, default=False,
+              help='Place paper buy orders. Default is dry run.')
+@click.option('--min-score', 'min_score', default=50, show_default=True, type=int,
+              help='Minimum Buffett score to consider for allocation.')
+def compound(source, budget, top, execute, min_score):
+    """Reinvest dividends and realized profits into top Buffett-scored tickers.
+
+    \b
+    Fetches recent Alpaca dividend payouts and realized P&L from your
+    history, then allocates the proceeds across the highest-scored tickers
+    on your watchlist (falls back to built-in value universe).
+
+    Examples:
+      buffet-bot compound                         # dry run, all sources
+      buffet-bot compound --source dividends      # dividends only
+      buffet-bot compound --execute --budget 200  # execute with $200 cap
+    """
+    # ── Step 1: gather income events ─────────────────────────────────────────
+    income_events: list[dict] = []
+
+    with console.status("[dim]Fetching income events...[/dim]"):
+        if source in ('dividends', 'all'):
+            income_events.extend(_fetch_dividend_activities())
+        if source in ('profits', 'all'):
+            income_events.extend(_fetch_realized_profits())
+
+    total_income = sum(e['amount'] for e in income_events)
+
+    if total_income <= 0 and budget is None:
+        console.print(Panel(
+            "[bright_yellow]No compoundable income found.[/bright_yellow]\n\n"
+            "[dim]• Paper accounts typically have no dividend history.\n"
+            "• Use [bold]--budget 500[/bold] to specify a manual amount to reinvest.\n"
+            "• Log realized profits with [bold]buffet-bot history[/bold] for future compound events.[/dim]",
+            title=_make_panel_title("Compound — No Income Found", "bright_yellow"),
+            border_style="bright_yellow", box=box.ROUNDED,
+        ))
+        return
+
+    reinvest_amount = budget if budget is not None else total_income
+    if budget is not None and total_income > 0:
+        total_income = min(total_income, budget)
+
+    # ── Step 2: show income summary ──────────────────────────────────────────
+    if income_events:
+        inc_tbl = Table(title="[bold bright_cyan]Income Events[/bold bright_cyan]",
+                        box=box.SIMPLE, header_style="bold bright_cyan")
+        inc_tbl.add_column("Date",   style="dim bright_white")
+        inc_tbl.add_column("Type",   style="bright_cyan")
+        inc_tbl.add_column("Ticker", style="bold bright_cyan")
+        inc_tbl.add_column("Amount", justify="right", style="bright_green")
+        for e in income_events[:20]:
+            inc_tbl.add_row(
+                e.get('date', '')[:10],
+                e['type'],
+                e.get('ticker', '—') or '—',
+                f"${e['amount']:,.2f}",
+            )
+        console.print(inc_tbl)
+
+    console.print(Panel(
+        f"Total income available: [bold bright_green]${total_income:,.2f}[/bold bright_green]\n"
+        f"Reinvestment amount:    [bold bright_white]${reinvest_amount:,.2f}[/bold bright_white]\n"
+        f"Source filter:          [dim]{source}[/dim]  |  "
+        f"Top tickers: [dim]{top}[/dim]  |  "
+        f"Min score: [dim]{min_score}[/dim]",
+        title=_make_panel_title("Compound — Income Summary", "bright_cyan"),
+        border_style="bright_cyan", box=box.ROUNDED,
+    ))
+
+    # ── Step 3: build candidate ticker list ──────────────────────────────────
+    watchlist_items = get_watchlist()
+    watchlist_tickers = [w['ticker'] for w in watchlist_items]
+    preset_tickers = GOAL_PRESETS.get('buffett', []) + GOAL_PRESETS.get('income', [])
+    candidates = list(dict.fromkeys(watchlist_tickers + preset_tickers))[:30]
+
+    # ── Step 4: score candidates concurrently ────────────────────────────────
+    console.print(f"[dim]Scoring {len(candidates)} candidate tickers...[/dim]")
+    scored: list[dict] = []
+
+    def _score_one(t):
+        try:
+            m = get_buffett_metrics(t)
+            return {'ticker': t, 'score': m.get('score', 0), 'beta': m.get('beta', 1.0)}
+        except Exception:
+            return {'ticker': t, 'score': 0, 'beta': 1.0}
+
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        futures = {ex.submit(_score_one, t): t for t in candidates}
+        for fut in as_completed(futures):
+            r = fut.result()
+            if r['score'] >= min_score:
+                scored.append(r)
+
+    if not scored:
+        console.print(
+            f"[bright_yellow]No tickers passed the minimum score ({min_score}). "
+            "Lower --min-score or add tickers to your watchlist.[/bright_yellow]"
+        )
+        return
+
+    scored.sort(key=lambda x: x['score'], reverse=True)
+    top_picks = scored[:top]
+
+    # ── Step 5: fetch live prices and compute allocation ──────────────────────
+    per_ticker_budget = reinvest_amount / len(top_picks)
+    allocations: list[dict] = []
+
+    with console.status("[dim]Fetching live prices for allocation...[/dim]"):
+        for pick in top_picks:
+            try:
+                rt = get_realtime_data(pick['ticker'])
+                price = rt.get('price', 0)
+                if not price:
+                    continue
+                qty = max(1, int(per_ticker_budget / price))
+                allocations.append({
+                    'ticker': pick['ticker'],
+                    'score':  pick['score'],
+                    'beta':   pick['beta'],
+                    'price':  price,
+                    'qty':    qty,
+                    'cost':   round(qty * price, 2),
+                })
+            except Exception:
+                continue
+
+    if not allocations:
+        console.print("[bright_red]Could not fetch live prices for any candidates.[/bright_red]")
+        return
+
+    # ── Step 6: display allocation table ─────────────────────────────────────
+    total_cost = sum(a['cost'] for a in allocations)
+
+    alloc_tbl = Table(
+        title="[bold bright_cyan]Compound Allocation Plan[/bold bright_cyan]",
+        box=box.ROUNDED, header_style="bold bright_cyan",
+    )
+    alloc_tbl.add_column("Ticker",  style="bold bright_cyan", no_wrap=True)
+    alloc_tbl.add_column("Score",   justify="right", style="bright_white")
+    alloc_tbl.add_column("Beta",    justify="right", style="dim bright_white")
+    alloc_tbl.add_column("Price",   justify="right", style="bright_white")
+    alloc_tbl.add_column("Qty",     justify="right", style="bright_white")
+    alloc_tbl.add_column("Cost",    justify="right", style="bright_green")
+
+    for a in allocations:
+        score_color = _score_color(a['score'])
+        alloc_tbl.add_row(
+            a['ticker'],
+            f"[{score_color}]{a['score']}[/{score_color}]",
+            f"{a['beta']:.2f}",
+            f"${a['price']:,.2f}",
+            str(a['qty']),
+            f"${a['cost']:,.2f}",
+        )
+
+    console.print(alloc_tbl)
+    console.print(
+        f"[bold bright_cyan]Total to deploy:[/bold bright_cyan] "
+        f"[bold bright_green]${total_cost:,.2f}[/bold bright_green]  "
+        f"[dim](of ${reinvest_amount:,.2f} available)[/dim]"
+    )
+
+    # ── Step 7: execute or dry-run ────────────────────────────────────────────
+    if not execute:
+        console.print(
+            "\n[dim bright_cyan]Dry run — add [bold]--execute[/bold] to place paper orders.[/dim bright_cyan]"
+        )
+        return
+
+    mode_label = "LIVE" if LIVE_MODE else "Paper"
+    orders_placed = 0
+    deployed = 0.0
+    allocated_log: list[dict] = []
+
+    for a in allocations:
+        if not click.confirm(
+            f"  BUY {a['qty']}x {a['ticker']} @ ~${a['price']:.2f} ({mode_label})?",
+            default=False,
+        ):
+            continue
+        if not confirm_live_execution(
+            f"BUY {a['qty']}x {a['ticker']}", a['ticker'], a['qty'], "BUY",
+            estimated_cost=a['cost'],
+        ):
+            continue
+        try:
+            order = MarketOrderRequest(
+                symbol=a['ticker'], qty=a['qty'],
+                side=OrderSide.BUY, time_in_force=TimeInForce.DAY,
+            )
+            result = trading_client.submit_order(order)
+            console.print(
+                f"  [bright_green]Order submitted: {result.id} "
+                f"({a['qty']}x {a['ticker']})[/bright_green]"
+            )
+            orders_placed += 1
+            deployed += a['cost']
+            allocated_log.append({'ticker': a['ticker'], 'qty': a['qty'], 'price': a['price']})
+        except Exception as e:
+            console.print(f"  [bright_red]Order error for {a['ticker']}: {e}[/bright_red]")
+
+    # ── Step 8: log compound event ────────────────────────────────────────────
+    if allocated_log:
+        source_ticker = income_events[0]['ticker'] if income_events else 'MANUAL'
+        log_compound_event(
+            source=source.upper(),
+            ticker=source_ticker,
+            amount_usd=reinvest_amount,
+            allocated_to=allocated_log,
+        )
+
+    console.print(Panel(
+        f"Orders placed: [bold bright_white]{orders_placed}[/bold bright_white]  |  "
+        f"Total deployed: [bold bright_green]${deployed:,.2f}[/bold bright_green]",
+        title=_make_panel_title("Compound — Complete", "bright_green"),
+        border_style="bright_green", box=box.ROUNDED,
+    ))

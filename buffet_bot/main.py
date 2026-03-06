@@ -25,7 +25,7 @@ from buffet_bot.cmd_intel import (
 # ── Portfolio commands ────────────────────────────────────────────────────────
 from buffet_bot.cmd_portfolio import (
     rebalance, backtest, correlate, check_sells, var,
-    forecast, whatif, scenarios, milestones, sectors,
+    forecast, whatif, scenarios, milestones, sectors, compound,
 )
 
 # ── Account commands ──────────────────────────────────────────────────────────
@@ -77,6 +77,7 @@ cli.add_command(whatif)
 cli.add_command(scenarios)
 cli.add_command(milestones)
 cli.add_command(sectors)
+cli.add_command(compound)
 
 # Register account commands
 cli.add_command(guide)

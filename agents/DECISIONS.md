@@ -22,6 +22,459 @@
 
 ---
 
+## ADR-015: Macro Regime Engine — `buffet_bot/macro.py`
+- **Date:** 2026-03-06
+- **Status:** Accepted
+- **Decided by:** Architect Agent (session 16)
+
+**Context:**
+
+v0.9.0 introduces sector rotation driven by macroeconomic regime detection. `data.py` already fetches three FRED indicators (`_fetch_fred_data()`: 10Y yield, CPI, Fed Funds Rate) inside `_run_analysis()`'s concurrent fan-out. The v0.9.0 roadmap adds regime classification, sector momentum ranking, and a `rotation-check` command. This requires a dedicated module that centralizes macro state logic — keeping it out of `data.py` (which is a pure fetcher) and `analysis.py` (which is per-ticker).
+
+**Decision:**
+
+Create `buffet_bot/macro.py` with:
+
+### Module Interface
+
+```python
+# buffet_bot/macro.py
+
+REGIMES = ('expansion', 'peak', 'contraction', 'trough')
+
+def detect_macro_regime(use_cache: bool = True) -> dict:
+    """Classify the current macro regime using FRED indicators.
+
+    Fetches (or loads from 1-hour cache in macro_regimes table):
+      - 10Y Treasury yield (DGS10)
+      - 2Y Treasury yield (DGS2) — NEW: yield curve spread
+      - CPI YoY (CPIAUCSL)
+      - Federal Funds Rate (FEDFUNDS)
+      - Unemployment Rate (UNRATE) — NEW
+      - ISM PMI proxy (MANEMP as manufacturing employment proxy)
+
+    Returns:
+        {
+          "regime": one of REGIMES,
+          "confidence": 0.0–1.0,
+          "indicators": {name: value, ...},
+          "cached": bool,
+          "timestamp": ISO UTC string,
+        }
+    """
+
+def _classify_regime(indicators: dict) -> tuple[str, float]:
+    """Deterministic regime classifier from indicator dict.
+
+    Rules (all simple threshold logic — no ML, no external deps):
+      - expansion:   yield_spread >= 0.5 AND unemployment <= 5.0 AND cpi <= 4.0
+      - peak:        cpi > 4.0 AND fed_funds rising AND unemployment <= 5.0
+      - contraction: yield_spread < 0 (inverted curve) OR unemployment > 6.0
+      - trough:      yield_spread recovering (>= -0.5) AND cpi falling AND unemployment > 5.5
+
+    Returns: (regime_name, confidence_score)
+    """
+
+def rank_sectors_by_momentum(
+    period_weights: tuple[float, float, float] = (0.5, 0.3, 0.2)
+) -> list[dict]:
+    """Rank 11 GICS sector ETFs by weighted momentum score.
+
+    Fetches 1-year price history for SECTOR_ETFS (from globals.py) via yfinance.
+    Computes: 30d_return * w[0] + 90d_return * w[1] + 252d_return * w[2]
+
+    Returns list of dicts sorted descending by score:
+        [{"etf": "XLK", "sector": "Technology", "score": 0.23, ...}, ...]
+    """
+
+def get_regime_sector_weights(regime: str) -> dict[str, float]:
+    """Return target allocation weights by sector ETF for a given regime.
+
+    Regime → overweight / underweight sectors (standard rotation playbook):
+      expansion:   XLK, XLY, XLF overweight; XLU, XLP, XLRE underweight
+      peak:        XLE, XLB, XLI overweight; XLK, XLRE underweight
+      contraction: XLU, XLP, XLV overweight; XLF, XLY, XLK underweight
+      trough:      XLF, XLY, XLK overweight; XLE, XLB underweight
+
+    Returns: {etf_symbol: target_weight_pct, ...}  (weights sum to 1.0)
+    """
+```
+
+### DB Schema: `macro_regimes` Table (cache)
+
+```sql
+CREATE TABLE IF NOT EXISTS macro_regimes (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp   TEXT    NOT NULL,       -- ISO 8601 UTC
+    regime      TEXT    NOT NULL,       -- expansion | peak | contraction | trough
+    confidence  REAL    NOT NULL,       -- 0.0 – 1.0
+    indicators  TEXT    NOT NULL,       -- JSON blob of raw FRED values
+    ttl_seconds INTEGER NOT NULL DEFAULT 3600  -- 1-hour cache
+);
+CREATE INDEX IF NOT EXISTS idx_macro_regimes_timestamp ON macro_regimes(timestamp);
+```
+
+Cache logic: `detect_macro_regime()` checks if the most recent row is < `ttl_seconds` old; if so, returns it (with `"cached": True`). Otherwise fetches live data, inserts a new row, and returns it.
+
+### Integration Points
+
+1. **`globals.py`**: Add `SECTOR_ETFS` constant (11-item dict: ETF → sector name).
+2. **`db.py`**: Add `init_macro_table()` called from `init_db()`.
+3. **`data.py`**: Extend `_fetch_fred_data()` to also fetch DGS2, UNRATE (add to the existing ThreadPoolExecutor pool — now 5 parallel requests, was 3).
+4. **`analysis.py`**: Inject `detect_macro_regime()` result into `_run_analysis()` concurrent fan-out (slot 10, `max_workers=10`); add `macro_block` to LLM prompt after existing `fred_block`.
+5. **`cmd_portfolio.py`**: `sectors` command updated to use `rank_sectors_by_momentum()`; new `rotation-check` and `hedge` commands added.
+
+**Rationale:**
+- Regime classification is deterministic threshold logic, not ML — no training data, no sklearn dependency, no risk of stale model.
+- 1-hour cache prevents FRED API hammering on repeated `analyze` calls.
+- Sector weights follow standard CFA/Vanguard sector rotation research — simple, documented, explainable to users.
+
+**Consequences:**
+- `detect_macro_regime()` adds ~0.3s to `analyze` when cache is cold (one FRED batch request).
+- FRED_API_KEY remains optional; `_fetch_fred_data()` already degrades gracefully without it.
+- New FRED series (DGS2, UNRATE) are public and free-tier accessible.
+
+---
+
+## ADR-014: Options Engine — `buffet_bot/options_engine.py`
+- **Date:** 2026-03-06
+- **Status:** Accepted
+- **Decided by:** Architect Agent (session 16)
+
+**Context:**
+
+v0.8.0 adds income-generating options strategies (covered calls, cash-secured puts). The existing `options` command in `cmd_intel.py` is display-only (put/call ratio, unusual volume). An `options_engine.py` module is needed to handle contract selection logic, yield calculations, and position tracking. Note: Alpaca's options API requires a live account (paper options trading is not supported) — all `--execute` paths are therefore gated behind `LIVE_MODE`.
+
+**Decision:**
+
+Create `buffet_bot/options_engine.py` with:
+
+### Module Interface
+
+```python
+# buffet_bot/options_engine.py
+
+def fetch_options_chain(ticker: str) -> dict:
+    """Fetch the full options chain for a ticker via yfinance.
+
+    Returns:
+        {
+          "ticker": str,
+          "expiries": [date_str, ...],  -- sorted ascending
+          "calls": pd.DataFrame,        -- yfinance calls table
+          "puts": pd.DataFrame,         -- yfinance puts table
+        }
+    Raises ValueError if no options data available.
+    """
+
+def find_optimal_covered_call(
+    ticker: str,
+    current_price: float,
+    target_delta: float = 0.30,
+    min_dte: int = 21,
+    max_dte: int = 45,
+) -> dict | None:
+    """Find the best covered call contract near target_delta and DTE range.
+
+    Delta proxy (greeks-free): strike / current_price ratio.
+      delta ≈ 0.30 → strike ≈ current_price * 1.03 to 1.07 (OTM)
+
+    Returns contract dict or None if no suitable contract found.
+    """
+
+def find_optimal_csp(
+    ticker: str,
+    current_price: float,
+    target_delta: float = 0.20,
+    min_dte: int = 21,
+    max_dte: int = 45,
+    max_cash_required: float = 10_000.0,
+) -> dict | None:
+    """Find the best cash-secured put near target_delta.
+
+    Delta proxy: strike / current_price ≈ 0.92 to 0.96 for delta 0.20.
+    Filters: bid > 0 (liquid), open_interest > 100 (active).
+
+    Returns contract dict or None.
+    """
+
+def annualized_yield(premium: float, strike: float, dte: int) -> float:
+    """Calculate annualized premium yield.
+
+    Formula: (premium / strike) * (365 / dte)
+    Returns float (e.g., 0.18 = 18% annualized).
+    """
+```
+
+### DB Schema: `options_positions` Table
+
+```sql
+CREATE TABLE IF NOT EXISTS options_positions (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    opened_at      TEXT    NOT NULL,   -- ISO 8601 UTC
+    ticker         TEXT    NOT NULL,
+    strategy       TEXT    NOT NULL,   -- 'COVERED_CALL' | 'CASH_PUT'
+    contract_sym   TEXT    NOT NULL,   -- OCC symbol (e.g., AAPL251219C00200000)
+    expiry         TEXT    NOT NULL,   -- YYYY-MM-DD
+    strike         REAL    NOT NULL,
+    premium_credit REAL    NOT NULL,   -- per share (×100 for total)
+    contracts      INTEGER NOT NULL DEFAULT 1,
+    status         TEXT    NOT NULL DEFAULT 'OPEN',  -- OPEN | EXPIRED | ROLLED | CLOSED
+    closed_at      TEXT    NOT NULL DEFAULT '',
+    realized_pnl   REAL    NOT NULL DEFAULT 0.0,
+    roll_count     INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_options_pos_ticker  ON options_positions(ticker);
+CREATE INDEX IF NOT EXISTS idx_options_pos_expiry  ON options_positions(expiry);
+CREATE INDEX IF NOT EXISTS idx_options_pos_status  ON options_positions(status);
+```
+
+### Key Design Constraints
+
+1. **No live greeks**: yfinance provides `delta` in some chains but not reliably. Use strike/price ratio as a delta proxy — well-documented approximation, zero external API cost.
+2. **Live-only execution**: All `--execute` paths are gated with `if not LIVE_MODE: raise click.ClickException("Options execution requires LIVE mode")`. This is the only command family where live mode is a prerequisite (not just optional).
+3. **`roll-check` at 7 DTE**: `options-income roll-check` flags positions within 7 days of expiry. Uses `_get_atr()` from `risk.py` to size the roll strikes.
+4. **`edge_score` integration (v0.8+)**: `options-income cash-puts` filters for tickers with `EDGE_SCORE > 65` — requires `edge.py` to be implemented first.
+
+**Consequences:**
+- `options_engine.py` has a hard dependency on `edge.py` for CSP ticker filtering in v0.8.0. ENG must implement in order.
+- No Alpaca paper options support means QA tests for execution paths must mock the Alpaca client.
+
+---
+
+## ADR-013: Multi-Factor Edge Score — `buffet_bot/edge.py`
+- **Date:** 2026-03-06
+- **Status:** Accepted
+- **Decided by:** Architect Agent (session 16)
+
+**Context:**
+
+v0.7.0 replaces the simple Buffett score as the primary ranking signal with a composite `EDGE_SCORE` combining five independent signal families. The score drives `edge-scan`, `backtest --edge`, and (in v0.8.0) CSP ticker filtering in `options_engine.py`. A dedicated module is needed to compute and persist these scores without polluting the existing `analysis.py` flow.
+
+**Decision:**
+
+Create `buffet_bot/edge.py` with:
+
+### Module Interface
+
+```python
+# buffet_bot/edge.py
+
+# Default signal weights — overridable via config [edge] section in globals.py
+DEFAULT_WEIGHTS = {
+    'buffett':   0.30,  # Buffett score (ROE, debt, margin) — from data.py
+    'llm':       0.20,  # LLM consensus confidence — from analysis.py
+    'insider':   0.20,  # Insider buy/sell signal — from db.py earnings_surprises + insiders
+    'politician':0.10,  # Congressional trade signal — from politicians.py
+    'earnings':  0.10,  # Earnings surprise streak — from db.py earnings_surprises
+    'analyst':   0.10,  # Analyst consensus upside — from data.py get_analyst_consensus
+}
+
+def compute_edge_score(
+    ticker: str,
+    weights: dict | None = None,
+    simulation_date: str | None = None,  # for backtesting — filter signals by date
+) -> dict:
+    """Compute the composite EDGE_SCORE for a ticker.
+
+    Returns:
+        {
+          "ticker": str,
+          "edge_score": 0–100,
+          "components": {signal_name: {"raw": float, "weighted": float}, ...},
+          "weights_used": dict,
+          "simulation_date": str | None,
+        }
+    """
+
+def compute_insider_signal(ticker: str, lookback_days: int = 90,
+                           simulation_date: str | None = None) -> float:
+    """Return 0–100 signal from recent insider Form 4 filings.
+
+    +points for buys, -points for sells, scaled by transaction count.
+    Reads from insiders module (SEC EDGAR Form 4).
+    """
+
+def compute_politician_signal(ticker: str, lookback_days: int = 180,
+                              simulation_date: str | None = None) -> float:
+    """Return 0–100 signal from congressional trading activity.
+
+    Weights buy transactions more heavily than sells (politicians rarely sell
+    stocks they just disclosed buying).
+    Reads from politicians module (House Stock Watcher).
+    """
+
+def compute_earnings_signal(ticker: str, lookback_quarters: int = 4) -> float:
+    """Return 0–100 signal from earnings surprise history in SQLite.
+
+    Perfect 4-quarter beat streak = 100. Mix of beats/misses scales down.
+    Reads from db.get_earnings_history().
+    """
+```
+
+### DB Schema: `edge_scans` Table
+
+```sql
+CREATE TABLE IF NOT EXISTS edge_scans (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    scanned_at      TEXT    NOT NULL,   -- ISO 8601 UTC
+    ticker          TEXT    NOT NULL,
+    edge_score      REAL    NOT NULL,
+    buffett_score   REAL    NOT NULL DEFAULT 0.0,
+    llm_score       REAL    NOT NULL DEFAULT 0.0,
+    insider_score   REAL    NOT NULL DEFAULT 0.0,
+    politician_score REAL   NOT NULL DEFAULT 0.0,
+    earnings_score  REAL    NOT NULL DEFAULT 0.0,
+    analyst_score   REAL    NOT NULL DEFAULT 0.0,
+    weights_json    TEXT    NOT NULL DEFAULT '{}',
+    simulation_date TEXT    NOT NULL DEFAULT ''   -- empty = live scan
+);
+CREATE INDEX IF NOT EXISTS idx_edge_scans_ticker     ON edge_scans(ticker);
+CREATE INDEX IF NOT EXISTS idx_edge_scans_scanned_at ON edge_scans(scanned_at);
+```
+
+### Config Extension (`globals.py` `_CONFIG_DEFAULTS`)
+
+```python
+_CONFIG_DEFAULTS = {
+    ...existing sections...,
+    'edge': {
+        'w_buffett':    0.30,
+        'w_llm':        0.20,
+        'w_insider':    0.20,
+        'w_politician': 0.10,
+        'w_earnings':   0.10,
+        'w_analyst':    0.10,
+    },
+}
+```
+
+### Backtest Anti-Lookahead Requirement
+
+`compute_edge_score(simulation_date=DATE)` MUST filter all time-series signals to only use data available on or before `simulation_date`. This is enforced by:
+- `compute_insider_signal`: filters Form 4 filings by `transaction_date <= simulation_date`
+- `compute_politician_signal`: filters congressional trades by `transaction_date <= simulation_date`
+- `compute_earnings_signal`: filters `earnings_surprises` by `report_date <= simulation_date`
+
+LLM and Buffett signals are excluded from lookahead-biased backtest runs (no historical LLM outputs stored). The `backtest --edge` flag runs weekly rebalancing using only non-LLM signals when `simulation_date` is provided.
+
+**Consequences:**
+- `edge.py` requires `insiders.py`, `politicians.py`, and `db.py` — no new external dependencies.
+- `options_engine.py` CSP filtering depends on `edge.py` being implemented first.
+- Signal weights in TOML config allow users to tune the model without code changes.
+
+---
+
+## ADR-012: Compounding Engine — `compound_log` + `sweeps` tables
+- **Date:** 2026-03-06
+- **Status:** Accepted
+- **Decided by:** Architect Agent (session 16)
+
+**Context:**
+
+v0.6.0 introduces a `compound` command that reinvests dividends and realized profits by allocating them via `_calculate_position_size()` + Buffett-ranked tickers. Two new capabilities need SQLite persistence: (1) a log of every reinvestment event for audit/reporting, and (2) a record of `automate --sweep` runs for deterministic scan→analyze→size→execute flows. Neither of these belongs in the existing `recommendations` table (which tracks LLM analysis outputs, not execution events).
+
+**Decision:**
+
+Add two tables to `db.py` and the corresponding helpers:
+
+### DB Schema: `compound_log` Table
+
+```sql
+CREATE TABLE IF NOT EXISTS compound_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp       TEXT    NOT NULL,   -- ISO 8601 UTC
+    source          TEXT    NOT NULL,   -- 'DIVIDEND' | 'REALIZED_PROFIT' | 'MANUAL'
+    ticker          TEXT    NOT NULL,   -- source ticker (e.g. AAPL paid dividend)
+    amount_usd      REAL    NOT NULL,   -- gross amount available for reinvestment
+    allocated_to    TEXT    NOT NULL,   -- JSON array of {ticker, qty, price} dicts
+    total_deployed  REAL    NOT NULL DEFAULT 0.0,
+    undeployed      REAL    NOT NULL DEFAULT 0.0,
+    notes           TEXT    NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_compound_log_timestamp ON compound_log(timestamp);
+CREATE INDEX IF NOT EXISTS idx_compound_log_source    ON compound_log(source);
+```
+
+### DB Schema: `sweeps` Table
+
+```sql
+CREATE TABLE IF NOT EXISTS sweeps (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at    TEXT    NOT NULL,   -- ISO 8601 UTC
+    completed_at  TEXT    NOT NULL DEFAULT '',
+    goal          TEXT    NOT NULL,   -- the natural-language goal passed to automate --sweep
+    budget_usd    REAL    NOT NULL,
+    tickers_scanned INTEGER NOT NULL DEFAULT 0,
+    orders_placed   INTEGER NOT NULL DEFAULT 0,
+    total_deployed  REAL    NOT NULL DEFAULT 0.0,
+    summary       TEXT    NOT NULL DEFAULT '',
+    status        TEXT    NOT NULL DEFAULT 'RUNNING'  -- RUNNING | COMPLETE | FAILED
+);
+```
+
+### Helper Function Contracts (for ENG reference)
+
+```python
+# db.py additions
+
+def log_compound_event(
+    source: str,           # 'DIVIDEND' | 'REALIZED_PROFIT' | 'MANUAL'
+    ticker: str,           # source ticker
+    amount_usd: float,     # gross available
+    allocated_to: list,    # [{ticker, qty, price}, ...]
+) -> int:
+    """Insert a compound_log row. Returns the new row id."""
+
+def get_compound_history(days: int = 90) -> list[dict]:
+    """Return compound_log rows within the last N days, newest first."""
+
+def create_sweep(goal: str, budget_usd: float) -> int:
+    """Insert a sweeps row with status=RUNNING. Returns the new row id."""
+
+def complete_sweep(sweep_id: int, tickers_scanned: int,
+                   orders_placed: int, total_deployed: float,
+                   summary: str, status: str = 'COMPLETE') -> None:
+    """Update a sweeps row to COMPLETE or FAILED."""
+
+def get_sweep_history(limit: int = 20) -> list[dict]:
+    """Return recent sweep rows, newest first."""
+```
+
+### `compound` Command Design (for ENG reference)
+
+```
+buffet-bot compound [--source dividends|profits|all] [--budget FLOAT] [--execute]
+```
+
+Flow:
+1. Fetch Alpaca corporate action activities (`/v2/account/activities?activity_type=DIV`)
+2. Fetch recent realized P&L from `outcomes` table (or Alpaca activities `activity_type=PTC`)
+3. Sum compoundable income by source filter
+4. Run `scan` on the universe, rank by Buffett score
+5. Allocate via `_calculate_position_size()` for each top-ranked ticker until budget exhausted
+6. Display allocation table; if `--execute`, place orders via `buy` + `confirm_live_execution()`
+7. Log to `compound_log` via `log_compound_event()`
+
+### `automate --sweep` Design (for ENG reference)
+
+The `--sweep` flag adds a `SWEEP_AGENT_PROMPT` template to `automate.py`. Sweep differs from standard automate:
+- **Deterministic**: scan → rank → size → execute top-N (no open-ended ReAct loop)
+- **Budget cap**: respects `--budget` strictly; aborts if no tickers pass Buffett threshold
+- **Logged**: creates a `sweeps` row via `create_sweep()`, updates on completion
+
+**Rationale:**
+- Separate tables from `recommendations` — compound events are execution records, not analysis outputs.
+- `compound_log.allocated_to` is JSON (not normalized rows) to keep the insert atomic and simple.
+- `sweeps` table enables a future `automate history` subcommand showing sweep effectiveness over time.
+
+**Consequences:**
+- ENG must add `init_compound_tables()` to `db.py` called from `init_db()`.
+- `compound` command has a soft dependency on Alpaca dividend activities endpoint — must degrade gracefully if the endpoint returns empty (new paper accounts have no dividend history).
+- `automate --sweep` is the only automate path that creates a `sweeps` row; standard `automate` does not.
+
+---
+
 ## ADR-011: Live Trading Guard — `buffet_bot/live_guard.py`
 - **Date:** 2026-03-04
 - **Status:** Accepted
@@ -460,7 +913,11 @@ These are decisions that haven't been made yet. The Product Manager should facil
 |----------|---------|--------|
 | When to split `main.py` into modules | Now 2760 lines; threshold 3000 | **Decided:** split executed session 10; 13 modules; see AUDIT.md |
 | Config file format | User preferences (model, risk, strategy) | **Decided:** TOML at `~/.buffet-bot-config.toml` — see ADR-009 |
-| Live trading safety | How to enable live mode without accidental activation | **Decided:** triple-confirmation in `live_guard.py` — see ADR-011 |
+| Live trading safety | How to enable live mode without accidental activation | **Decided:** triple-confirmation in `live_guard.py` — see ADR-011; implemented and verified session 16 |
 | Async LLM queries | Two models queried sequentially — slow | **Decided:** retain ThreadPoolExecutor — see ADR-010 |
+| Compounding Engine schema | `compound_log` and `sweeps` table design | **Decided:** see ADR-012; ENG session 17 implements |
+| Edge Score architecture | Multi-factor composite score replacing Buffett-only ranking | **Decided:** see ADR-013; dedicated ENG session after session 17 |
+| Options Engine architecture | Covered call / CSP selection logic, position tracking | **Decided:** see ADR-014; requires edge.py first |
+| Macro Regime Engine architecture | FRED regime classifier, sector rotation | **Decided:** see ADR-015; ENG session for v0.9.0 |
 | PyPI distribution | Making `pip install buffet-bot` work | Open — needs version tagging strategy |
 | Multi-model expansion | Users want `llama3`, `mistral`, etc. | Open — MODELS list is hardcoded; no decision made |

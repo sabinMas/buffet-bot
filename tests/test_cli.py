@@ -322,3 +322,198 @@ class TestWatchlistCommands:
         r2 = runner.invoke(cli, ['watchlist', 'add', 'JPM'])
         assert r1.exit_code == 0
         assert r2.exit_code == 0
+
+
+# ── live_guard — is_live_mode() ───────────────────────────────────────────────
+
+class TestIsLiveMode:
+    """Unit tests for live_guard.is_live_mode() env-var logic."""
+
+    def test_both_vars_set_returns_true(self, monkeypatch):
+        monkeypatch.setenv('BUFFET_BOT_LIVE', '1')
+        monkeypatch.setenv('BUFFET_BOT_LIVE_SECRET', 'mysecret')
+        from buffet_bot.live_guard import is_live_mode
+        assert is_live_mode() is True
+
+    def test_only_live_flag_returns_false(self, monkeypatch):
+        monkeypatch.setenv('BUFFET_BOT_LIVE', '1')
+        monkeypatch.delenv('BUFFET_BOT_LIVE_SECRET', raising=False)
+        from buffet_bot.live_guard import is_live_mode
+        assert is_live_mode() is False
+
+    def test_only_secret_returns_false(self, monkeypatch):
+        monkeypatch.delenv('BUFFET_BOT_LIVE', raising=False)
+        monkeypatch.setenv('BUFFET_BOT_LIVE_SECRET', 'mysecret')
+        from buffet_bot.live_guard import is_live_mode
+        assert is_live_mode() is False
+
+    def test_neither_var_returns_false(self, monkeypatch):
+        monkeypatch.delenv('BUFFET_BOT_LIVE', raising=False)
+        monkeypatch.delenv('BUFFET_BOT_LIVE_SECRET', raising=False)
+        from buffet_bot.live_guard import is_live_mode
+        assert is_live_mode() is False
+
+    def test_live_flag_wrong_value_returns_false(self, monkeypatch):
+        """BUFFET_BOT_LIVE must be exactly '1' — any other value is paper mode."""
+        monkeypatch.setenv('BUFFET_BOT_LIVE', 'true')
+        monkeypatch.setenv('BUFFET_BOT_LIVE_SECRET', 'mysecret')
+        from buffet_bot.live_guard import is_live_mode
+        assert is_live_mode() is False
+
+    def test_empty_secret_returns_false(self, monkeypatch):
+        """An empty BUFFET_BOT_LIVE_SECRET must not activate live mode."""
+        monkeypatch.setenv('BUFFET_BOT_LIVE', '1')
+        monkeypatch.setenv('BUFFET_BOT_LIVE_SECRET', '')
+        from buffet_bot.live_guard import is_live_mode
+        assert is_live_mode() is False
+
+
+# ── live_guard — confirm_live_execution() ─────────────────────────────────────
+
+class TestConfirmLiveExecution:
+    """Tests for the Factor-3 confirmation gate."""
+
+    def test_paper_mode_returns_true_immediately(self, in_memory_db, monkeypatch):
+        """In paper mode confirm_live_execution() returns True without prompting."""
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', in_memory_db)
+        monkeypatch.delenv('BUFFET_BOT_LIVE', raising=False)
+        monkeypatch.delenv('BUFFET_BOT_LIVE_SECRET', raising=False)
+        from buffet_bot.live_guard import confirm_live_execution
+        result = confirm_live_execution('BUY 10x AAPL', 'AAPL', 10, 'BUY', 1500.0)
+        assert result is True
+
+    def _setup_live_audit_db(self, db_path, monkeypatch):
+        """Patch globals.DB_PATH and ensure live_audit table exists in temp DB."""
+        monkeypatch.setattr('buffet_bot.globals.DB_PATH', db_path)
+        from buffet_bot.live_guard import init_live_audit_table
+        init_live_audit_table()
+
+    def test_paper_mode_logs_passthrough_row(self, in_memory_db, monkeypatch):
+        """Paper mode must write a PAPER_PASSTHROUGH row to live_audit."""
+        import sqlite3 as _sqlite3
+        self._setup_live_audit_db(in_memory_db, monkeypatch)
+        monkeypatch.delenv('BUFFET_BOT_LIVE', raising=False)
+        monkeypatch.delenv('BUFFET_BOT_LIVE_SECRET', raising=False)
+        from buffet_bot.live_guard import confirm_live_execution
+        confirm_live_execution('BUY 5x MSFT', 'MSFT', 5, 'BUY', 1500.0)
+        conn = _sqlite3.connect(in_memory_db)
+        rows = conn.execute("SELECT outcome FROM live_audit WHERE ticker='MSFT'").fetchall()
+        conn.close()
+        assert len(rows) == 1
+        assert rows[0][0] == 'PAPER_PASSTHROUGH'
+
+    def test_live_mode_correct_phrase_returns_true(self, in_memory_db, monkeypatch):
+        """In LIVE mode typing 'YES I CONFIRM' exactly must return True."""
+        self._setup_live_audit_db(in_memory_db, monkeypatch)
+        monkeypatch.setenv('BUFFET_BOT_LIVE', '1')
+        monkeypatch.setenv('BUFFET_BOT_LIVE_SECRET', 'testsecret')
+        with patch('buffet_bot.live_guard.click.prompt', return_value='YES I CONFIRM'):
+            from buffet_bot.live_guard import confirm_live_execution
+            result = confirm_live_execution('BUY 1x AAPL', 'AAPL', 1, 'BUY', 150.0)
+        assert result is True
+
+    def test_live_mode_wrong_phrase_returns_false(self, in_memory_db, monkeypatch):
+        """In LIVE mode typing anything other than 'YES I CONFIRM' must return False."""
+        self._setup_live_audit_db(in_memory_db, monkeypatch)
+        monkeypatch.setenv('BUFFET_BOT_LIVE', '1')
+        monkeypatch.setenv('BUFFET_BOT_LIVE_SECRET', 'testsecret')
+        with patch('buffet_bot.live_guard.click.prompt', return_value='yes'):
+            from buffet_bot.live_guard import confirm_live_execution
+            result = confirm_live_execution('BUY 1x AAPL', 'AAPL', 1, 'BUY', 150.0)
+        assert result is False
+
+    def test_live_mode_rejection_logs_rejected_row(self, in_memory_db, monkeypatch):
+        """A rejected live order must write outcome='REJECTED' to live_audit."""
+        import sqlite3 as _sqlite3
+        self._setup_live_audit_db(in_memory_db, monkeypatch)
+        monkeypatch.setenv('BUFFET_BOT_LIVE', '1')
+        monkeypatch.setenv('BUFFET_BOT_LIVE_SECRET', 'testsecret')
+        with patch('buffet_bot.live_guard.click.prompt', return_value='no'):
+            from buffet_bot.live_guard import confirm_live_execution
+            confirm_live_execution('SELL 2x TSLA', 'TSLA', 2, 'SELL', 400.0)
+        conn = _sqlite3.connect(in_memory_db)
+        rows = conn.execute("SELECT outcome FROM live_audit WHERE ticker='TSLA'").fetchall()
+        conn.close()
+        assert len(rows) == 1
+        assert rows[0][0] == 'REJECTED'
+
+    def test_live_mode_correct_phrase_logs_confirmed_row(self, in_memory_db, monkeypatch):
+        """An approved live order must write outcome='CONFIRMED' to live_audit."""
+        import sqlite3 as _sqlite3
+        self._setup_live_audit_db(in_memory_db, monkeypatch)
+        monkeypatch.setenv('BUFFET_BOT_LIVE', '1')
+        monkeypatch.setenv('BUFFET_BOT_LIVE_SECRET', 'testsecret')
+        with patch('buffet_bot.live_guard.click.prompt', return_value='YES I CONFIRM'):
+            from buffet_bot.live_guard import confirm_live_execution
+            confirm_live_execution('BUY 1x NVDA', 'NVDA', 1, 'BUY', 500.0)
+        conn = _sqlite3.connect(in_memory_db)
+        rows = conn.execute("SELECT outcome FROM live_audit WHERE ticker='NVDA'").fetchall()
+        conn.close()
+        assert rows[0][0] == 'CONFIRMED'
+
+
+# ── compound command ──────────────────────────────────────────────────────────
+
+class TestCompoundCommand:
+    """Tests for: buffet-bot compound [--budget] [--source] [--execute]"""
+
+    def test_help_exits_zero(self, runner):
+        result = runner.invoke(cli, ['compound', '--help'])
+        assert result.exit_code == 0
+        assert '--budget' in result.output
+        assert '--source' in result.output
+        assert '--execute' in result.output
+
+    def test_no_income_no_budget_shows_guidance(self, runner, in_memory_db, monkeypatch):
+        """With no income events and no --budget, show the guidance panel."""
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', in_memory_db)
+        with patch('buffet_bot.cmd_portfolio._fetch_dividend_activities', return_value=[]):
+            with patch('buffet_bot.cmd_portfolio._fetch_realized_profits', return_value=[]):
+                result = runner.invoke(cli, ['compound'])
+        assert result.exit_code == 0
+        assert 'No compoundable income' in result.output or \
+               'budget' in result.output.lower()
+
+    def test_budget_override_skips_income_check(self, runner, in_memory_db, monkeypatch):
+        """--budget bypasses the 'no income' early-exit and proceeds to scoring."""
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', in_memory_db)
+        mock_metrics = {'score': 70, 'beta': 1.0}
+        mock_rt = {'price': 100.0}
+        with patch('buffet_bot.cmd_portfolio._fetch_dividend_activities', return_value=[]):
+            with patch('buffet_bot.cmd_portfolio._fetch_realized_profits', return_value=[]):
+                with patch('buffet_bot.cmd_portfolio.get_buffett_metrics', return_value=mock_metrics):
+                    with patch('buffet_bot.cmd_portfolio.get_realtime_data', return_value=mock_rt):
+                        result = runner.invoke(cli, ['compound', '--budget', '500', '--min-score', '0'])
+        assert result.exit_code == 0
+        # Should show allocation plan or dry-run message, not the guidance panel
+        assert 'Dry run' in result.output or 'Allocation' in result.output
+
+    def test_dry_run_does_not_place_orders(self, runner, in_memory_db, monkeypatch):
+        """Without --execute, no orders are submitted to Alpaca."""
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', in_memory_db)
+        mock_metrics = {'score': 65, 'beta': 1.2}
+        mock_rt = {'price': 50.0}
+        mock_order = MagicMock()
+        with patch('buffet_bot.cmd_portfolio._fetch_dividend_activities', return_value=[]):
+            with patch('buffet_bot.cmd_portfolio._fetch_realized_profits', return_value=[]):
+                with patch('buffet_bot.cmd_portfolio.get_buffett_metrics', return_value=mock_metrics):
+                    with patch('buffet_bot.cmd_portfolio.get_realtime_data', return_value=mock_rt):
+                        with patch('buffet_bot.cmd_portfolio.trading_client') as mock_tc:
+                            result = runner.invoke(cli, ['compound', '--budget', '300', '--min-score', '0'])
+        assert result.exit_code == 0
+        mock_tc.submit_order.assert_not_called()
+
+    def test_source_dividends_only_skips_profits(self, runner, in_memory_db, monkeypatch):
+        """--source dividends must not call _fetch_realized_profits."""
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', in_memory_db)
+        mock_profits = MagicMock(return_value=[])
+        mock_divs = MagicMock(return_value=[])
+        with patch('buffet_bot.cmd_portfolio._fetch_dividend_activities', mock_divs):
+            with patch('buffet_bot.cmd_portfolio._fetch_realized_profits', mock_profits):
+                runner.invoke(cli, ['compound', '--source', 'dividends'])
+        mock_divs.assert_called_once()
+        mock_profits.assert_not_called()
+
+    def test_invalid_source_fails(self, runner):
+        result = runner.invoke(cli, ['compound', '--source', 'crypto'])
+        assert result.exit_code != 0
