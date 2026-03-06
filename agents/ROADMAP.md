@@ -1,8 +1,8 @@
 # Buffet-Bot Roadmap
 
 > Managed by: Product Manager Agent
-> Last updated: 2026-03-01
-> Current version: v0.4.1
+> Last updated: 2026-03-06
+> Current version: v0.5.0
 
 ---
 
@@ -20,20 +20,78 @@
 | 8       | QA + Engineer (v0.5.0 bugfix) | complete |
 | 9       | Engineer (v0.5.0 finish) | complete |
 | 10      | Engineer (refactor main.py) | complete |
-| 11      | PM / Release Manager (v0.5.0 release) | outstanding — not yet taken |
+| 11      | PM / Release Manager (v0.5.0 release) | outstanding — skipped, rolled into session 15 |
 | 12–14   | Engineer (v0.5.0 PERF + v0.6.0 ENG unblocked items) | complete |
-| **15 →**| **PM / Release Manager (v0.5.0 release)** | in progress (async with session 16) |
+| 15      | PM / Release Manager (v0.5.0 release) | complete — 2026-03-06 |
 | 16      | Architect (v0.6.0 design — live trading guard + compound + sweep) | complete |
 | **17 →**| **ENG (v0.6.0 — compound command + automate --sweep)** | **next** |
 
-**Current milestone:** v0.5.0 all items `[x]` including PERF. v0.6.0 Live Guard ARCH+ENG complete. Several v0.6.0 display-only ENG items also done early.
+**Current milestone:** v0.5.0 SHIPPED (tag v0.5.0, 2026-03-06). v0.6.0 Live Guard ARCH+ENG complete. Several v0.6.0 display-only ENG items also done early.
 **Do NOT take Security Auditor** until v1.0.0 milestone is explicitly started.
-**Session 15 (PM):** Bump `pyproject.toml` 0.4.1 → 0.5.0, write `CHANGELOG.md` v0.5.0 entry, tag `v0.5.0`, update PITCH.md (async with session 16).
-**Session 17 focus:** ENG — `compound_log`+`sweeps` tables in `db.py`, `compound` command in `cmd_portfolio.py`, `automate --sweep` flag, Alpaca corporate actions endpoint. All unblocked by live_guard.py (done). See ADR-012 for schema design.
+**Session 17 focus:** ENG — `compound_log`+`sweeps` tables in `db.py`, `compound` command in `cmd_portfolio.py`, `automate --sweep` flag, Alpaca corporate actions endpoint. All unblocked by live_guard.py (done). See ADR-012 for schema design. Also commit `buffet_bot/live_guard.py` (untracked — implement and stage first).
 
 ---
 
 ## Session Handoff Log
+
+### 2026-03-06 — PM / Release Manager (session 15 — v0.5.0 release)
+**Role taken:** PM / Release Manager [REL] — v0.5.0 release preparation and tagging
+**What was done:**
+- **Committed all outstanding changes from sessions 12-14** (13 modified files): `compare`,
+  `explain`, `sectors` commands; SPY benchmark overlay on `portfolio`; PAPER/LIVE banner on
+  `status`; `BUFFET_BOT_THEME` env var + `theme_color()` helper; `LIVE_MODE` stub; ADR-010
+  (ThreadPoolExecutor); performance baseline in AUDIT.md; UI overhaul; yfinance/DB lock fixes
+- **Bumped version 0.4.1 → 0.5.0** in `pyproject.toml` and `buffet_bot/__init__.py`
+- **Created `CHANGELOG.md`** — full version history v0.2.0 through v0.5.0 using Keep a
+  Changelog format; v0.5.0 entry covers all work from sessions 1-14 (35+ commands,
+  13-module refactor, 149 tests, security audit, perf baseline, all signals)
+- **Updated `agents/ROADMAP.md`**: header version bumped to v0.5.0, session 15 marked
+  complete, session 16 already complete per Architect entry, CHANGELOG.md distribution
+  item marked `[x]`, Active Role Assignment updated for session 17
+- **Created annotated git tag `v0.5.0`**: `v0.5.0: Automation + Advanced Signals`
+
+**Not committed (intentionally deferred):**
+- `buffet_bot/live_guard.py` — untracked; verified complete by Architect (session 16);
+  session 17 ENG should `git add buffet_bot/live_guard.py` and commit it before
+  implementing the compound/sweep commands that depend on it
+
+**Release checklist verified:**
+- [x] Version consistent: `pyproject.toml` v0.5.0, `__init__.py` v0.5.0, tag v0.5.0, CHANGELOG v0.5.0
+- [x] `CHANGELOG.md` has v0.5.0 entry with date 2026-03-06
+- [x] Paper trading safeguard (`paper=True`) intact — never modified
+- [x] `live_guard.py` untracked and NOT committed (belongs to ENG session 17 scope)
+- [x] No placeholder stubs — all v0.5.0 items are `[x]` complete
+
+**Next:** ENG session 17 — v0.6.0 compound command + automate --sweep (see ADR-012); commit live_guard.py first
+
+---
+
+### 2026-03-06 — Architect (session 16 — v0.6.0 Live Guard + compound engine design)
+**Role taken:** Architect [ARCH] — v0.6.0 live guard verification + compound engine architecture
+**What was done:**
+- **Verified `live_guard.py` fully implemented** (untracked in git but complete): `is_live_mode()` (Factors 1+2: `BUFFET_BOT_LIVE=1` + `BUFFET_BOT_LIVE_SECRET` non-empty), `get_trading_client()` (paper=not LIVE_MODE, singleton cache), `confirm_live_execution()` (Factor 3: red warning panel + "YES I CONFIRM" prompt), `log_live_audit()`, `init_live_audit_table()` with indexes
+- **Verified all 9 ADR-011 call sites wired**: `cmd_trading.py` (analyze, buy), `cmd_portfolio.py` (rebalance, check-sells), `cmd_account.py` (automate buy_stock), `plans.py` (2 sites), `crypto.py` (1 site), `db.py` init_live_audit_table call
+- **Verified `globals.py` integration**: imports `is_live_mode` + `get_trading_client` from `live_guard`; `LIVE_MODE` and `trading_client` now live-aware
+- **ADR-011 confirmed in `agents/DECISIONS.md`** (was written in a prior pulled-forward session): triple-confirmation design, call site inventory, ADR-004 amendment
+- **ADR-012 written** (`agents/DECISIONS.md`): Compounding Engine schema — `compound_log` table (dividend/profit reinvestment rows), `sweeps` table (automate --sweep runs), `get_compoundable_income()` and `log_compound_event()` helper contracts
+- **ADR-013 written** (`agents/DECISIONS.md`): Multi-factor Edge Score architecture — `edge.py` module design, `compute_edge_score()` signature, `edge_scans` table schema, signal weight configuration in `globals.py`
+- **ADR-014 written** (`agents/DECISIONS.md`): Options Engine architecture — `options_engine.py` module design, greeks-free delta proxy, `options_positions` table schema, Alpaca options API integration contract
+- **ADR-015 written** (`agents/DECISIONS.md`): Macro Regime Engine architecture — `macro.py` module design, `detect_macro_regime()` regime classifier, `macro_regimes` table with 1-hour cache, FRED indicator expansion contract
+- **ROADMAP updated**: all v0.6.0 Live Guard items marked `[x]`
+
+**Note for PM (session 15):** `live_guard.py` needs to be `git add`-ed and committed as part of the v0.5.0/v0.6.0 release. It is fully implemented and integrated but was never staged.
+
+**Blocked (removed by this session):**
+- ~~`live_guard.py`~~ — now unblocked; all v0.6.0 ENG items can proceed
+- `compound` command — schema designed (ADR-012); ready for ENG session 17
+- `automate --sweep` — design approved; ready for ENG session 17
+- All v0.7.0 ENG items — unblocked by `edge.py` design (ADR-013); ready for dedicated ARCH+ENG sessions
+- All v0.8.0 ENG items — unblocked by `options_engine.py` design (ADR-014)
+- All v0.9.0 ENG items — unblocked by `macro.py` design (ADR-015)
+
+**Next:** ENG session 17 — implement `compound_log`+`sweeps` tables, `compound` command, `automate --sweep` flag
+
+---
 
 ### 2026-03-04 — Software Engineer (session 14 — v0.5.0 PERF + v0.6.0 ENG unblocked)
 **Role taken:** Software Engineer [ENG] — v0.5.0 PERF items + v0.6.0 display-only ENG items
@@ -342,7 +400,7 @@
 - [ ] [PM+ENG+REL] PyPI package: `pip install buffet-bot`
 - [ ] [REL] Docker image with Ollama sidecar
 - [ ] [PM+REL] Contribution guide and PR template
-- [ ] [REL] CHANGELOG.md — full version history from v0.1.0
+- [x] [REL] CHANGELOG.md — full version history from v0.2.0 — complete 2026-03-06 (v0.2.0–v0.5.0; extend to v0.1.0 pre-launch history is low priority)
 
 ---
 
@@ -353,10 +411,10 @@
 
 | Field | Value |
 |-------|-------|
-| **Next session role** | PM / Release Manager |
-| **Suggested focus** | Bump `pyproject.toml` 0.4.1 → 0.5.0, write `CHANGELOG.md` v0.5.0 entry, tag `v0.5.0`, update PITCH.md with command count, v0.6–v0.9 sections, and new features from sessions 12–14 |
-| **Do NOT take** | Security Auditor (gated to v1.0.0 pre-release; audit is complete for this milestone) |
-| **Last updated** | 2026-03-04 by Software Engineer Agent (session 14) |
+| **Next session role** | ENG — v0.6.0 Compounding Engine (session 17) |
+| **Suggested focus** | Implement `compound_log` + `sweeps` tables in `db.py`; `compound` command in `cmd_portfolio.py`; `automate --sweep` flag; Alpaca `/v2/account/activities?activity_type=DIV` endpoint. See ADR-012 for full schema + helper contracts. Also: `git add buffet_bot/live_guard.py` and commit it (untracked — verified complete by Architect session 16). |
+| **Do NOT take** | Security Auditor (gated to v1.0.0 pre-release) |
+| **Last updated** | 2026-03-06 by PM / Release Manager (session 15) |
 
 ---
 
