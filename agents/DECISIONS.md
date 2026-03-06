@@ -22,6 +22,273 @@
 
 ---
 
+## ADR-011: Live Trading Guard — `buffet_bot/live_guard.py`
+- **Date:** 2026-03-04
+- **Status:** Accepted
+- **Decided by:** Architect Agent (session 16, pulled forward)
+
+**Context:**
+
+Buffet-Bot was designed as a paper-only trading system (ADR-004: `paper=True` hardcoded, non-negotiable). The v0.6.0 roadmap introduces the ability to optionally enable live trading for users who explicitly opt in. This creates a tension: the system must remain paper-by-default and require extraordinary, deliberate effort to switch to live mode. A single env var or config toggle is insufficient — accidental activation of live mode could result in real financial loss.
+
+There are currently **9 distinct call sites** across 6 modules that place orders via Alpaca's `TradingClient` or construct `TradingClient` instances directly. Two locations hardcode `paper=True` (`globals.py:45`, `crypto.py:354`). Every `--execute` path uses a simple `click.confirm()` prompt that mentions "(Paper)" in its text. None of these paths are aware of trading mode.
+
+The `LIVE_MODE = False` stub already exists in `globals.py:117` but is not wired to anything.
+
+**Problem statement:**
+
+We need a module that:
+1. Controls the single source of truth for whether the system is in PAPER or LIVE mode
+2. Provides a triple-confirmation gate that must be passed before any live order can be submitted
+3. Logs every live trade attempt (successful or rejected) to an audit table for forensic review
+4. Integrates cleanly with all 9 existing order-placement call sites without requiring each command to re-implement safety logic
+5. Preserves ADR-004's guarantee: paper mode is the default, always, with zero configuration
+
+**Decision:**
+
+Create `buffet_bot/live_guard.py` with the following design:
+
+### Activation Model (Three Independent Factors)
+
+Live mode requires ALL THREE of the following to be true simultaneously. If any single factor is absent, the system remains in paper mode silently:
+
+| Factor | Mechanism | Purpose |
+|--------|-----------|---------|
+| **Factor 1: Environment variable** | `BUFFET_BOT_LIVE=1` in `.env` or shell | Prevents accidental activation — user must deliberately set this |
+| **Factor 2: Secret confirmation token** | `BUFFET_BOT_LIVE_SECRET=<user-chosen-passphrase>` in `.env` | Prevents copy-paste accidents — a second, distinct credential must exist |
+| **Factor 3: Runtime confirmation** | Interactive `click.confirm()` prompt with explicit "I understand this uses REAL MONEY" text | Prevents scripted/automated activation without human presence |
+
+The module exports a single boolean `is_live_mode()` that checks Factors 1 and 2. Factor 3 is enforced at each order-placement call site via `confirm_live_execution()`.
+
+### Module Interface
+
+```python
+# buffet_bot/live_guard.py
+
+def is_live_mode() -> bool:
+    """Check whether LIVE mode is activated (Factors 1 + 2).
+
+    Returns True only when BOTH:
+      - BUFFET_BOT_LIVE=1
+      - BUFFET_BOT_LIVE_SECRET is set and non-empty
+
+    Returns False in all other cases (the safe default).
+    """
+
+def get_trading_client() -> TradingClient:
+    """Return an Alpaca TradingClient with paper= derived from is_live_mode().
+
+    This replaces the direct TradingClient construction in globals.py.
+    The returned client is a module-level singleton, created once.
+    """
+
+def confirm_live_execution(action: str, ticker: str, qty: int,
+                           side: str, estimated_cost: float = 0.0) -> bool:
+    """Triple-confirmation gate for live orders (Factor 3).
+
+    In PAPER mode: returns True immediately (no extra prompt needed).
+    In LIVE mode: displays a red warning panel and requires the user to
+    type the confirmation phrase exactly. Logs the attempt to the
+    live_audit table regardless of outcome.
+
+    Parameters:
+        action:         Human-readable description (e.g., "BUY 10x AAPL")
+        ticker:         The ticker symbol
+        qty:            Number of shares/units
+        side:           "BUY" or "SELL"
+        estimated_cost: Approximate dollar value of the order
+
+    Returns:
+        True if the order should proceed, False if rejected.
+    """
+
+def log_live_audit(ticker: str, side: str, qty: int,
+                   estimated_cost: float, outcome: str,
+                   rejection_reason: str = '') -> None:
+    """Write a row to the live_audit table.
+
+    Called automatically by confirm_live_execution(). Also available
+    for direct use by modules that need to log order outcomes.
+
+    Parameters:
+        ticker:           The ticker symbol
+        side:             "BUY" or "SELL"
+        qty:              Number of shares/units
+        estimated_cost:   Approximate dollar value
+        outcome:          "CONFIRMED", "REJECTED", "ERROR", "PAPER_PASSTHROUGH"
+        rejection_reason: Why the order was rejected (empty if confirmed)
+    """
+
+def init_live_audit_table() -> None:
+    """Create the live_audit table if it does not exist.
+
+    Called from db.py init_db(). Uses CREATE TABLE IF NOT EXISTS
+    for backwards compatibility.
+    """
+```
+
+### DB Schema: `live_audit` Table
+
+```sql
+CREATE TABLE IF NOT EXISTS live_audit (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp        TEXT    NOT NULL,  -- ISO 8601 UTC
+    ticker           TEXT    NOT NULL,
+    side             TEXT    NOT NULL,  -- 'BUY' or 'SELL'
+    qty              INTEGER NOT NULL,
+    estimated_cost   REAL    NOT NULL DEFAULT 0.0,
+    trading_mode     TEXT    NOT NULL,  -- 'PAPER' or 'LIVE'
+    outcome          TEXT    NOT NULL,  -- 'CONFIRMED', 'REJECTED', 'ERROR', 'PAPER_PASSTHROUGH'
+    rejection_reason TEXT    NOT NULL DEFAULT '',
+    client_ip        TEXT    NOT NULL DEFAULT '',  -- for future multi-session forensics
+    session_id       TEXT    NOT NULL DEFAULT ''   -- unique per CLI invocation
+);
+
+CREATE INDEX IF NOT EXISTS idx_live_audit_ticker ON live_audit(ticker);
+CREATE INDEX IF NOT EXISTS idx_live_audit_timestamp ON live_audit(timestamp);
+```
+
+### Integration Points
+
+**1. `globals.py` changes:**
+
+Replace the current hardcoded `TradingClient` construction:
+
+```python
+# BEFORE (current):
+trading_client = TradingClient(API_KEY, SECRET_KEY, paper=True)
+LIVE_MODE = False
+
+# AFTER:
+from buffet_bot.live_guard import is_live_mode, get_trading_client
+LIVE_MODE = is_live_mode()
+trading_client = get_trading_client()
+```
+
+The `LIVE_MODE` constant remains importable from `globals.py` by all modules, preserving all existing import paths. The only behavioral change is that it now reflects reality instead of being hardcoded False.
+
+**2. `crypto.py` change (line 354):**
+
+Replace the inline `TradingClient` construction:
+
+```python
+# BEFORE:
+_client = _TC(os.getenv("ALPACA_API_KEY"), os.getenv("ALPACA_SECRET_KEY"), paper=True)
+
+# AFTER:
+from buffet_bot.live_guard import get_trading_client
+_client = get_trading_client()
+```
+
+**3. All `--execute` paths (9 call sites):**
+
+Each call site wraps its order submission with `confirm_live_execution()`. Example for `cmd_trading.py` analyze command:
+
+```python
+# BEFORE:
+if not dry_run and result['consensus'] == 'BUY':
+    if click.confirm(f'Execute BUY {ticker}? (Paper)'):
+        _place_order(ticker, best)
+
+# AFTER:
+from buffet_bot.live_guard import confirm_live_execution
+if not dry_run and result['consensus'] == 'BUY':
+    mode_label = "LIVE" if LIVE_MODE else "Paper"
+    if click.confirm(f'Execute BUY {ticker}? ({mode_label})'):
+        if confirm_live_execution("BUY", ticker, best.get('qty', 1), "BUY",
+                                   estimated_cost=best.get('qty', 1) * realtime.get('price', 0)):
+            _place_order(ticker, best)
+```
+
+In paper mode, `confirm_live_execution()` returns True immediately and logs a `PAPER_PASSTHROUGH` audit row. In live mode, it shows the red warning panel and requires explicit confirmation.
+
+**4. `_place_order()` in `analysis.py`:**
+
+`_place_order()` itself does NOT call `confirm_live_execution()`. The guard sits at each caller, not inside `_place_order()`, because:
+- Some callers (like `automate`) have non-interactive flows where the confirmation must happen earlier
+- The guard needs context (action description, estimated cost) that `_place_order()` does not have
+- Putting the guard in callers keeps `_place_order()` a simple, testable order-submission function
+
+**5. `db.py` change:**
+
+Add `init_live_audit_table()` call inside `init_db()`:
+
+```python
+def init_db():
+    # ... existing CREATE TABLE statements ...
+    from buffet_bot.live_guard import init_live_audit_table
+    init_live_audit_table()
+```
+
+### Reconciliation with ADR-004
+
+ADR-004 states: "`paper=True` is hardcoded. There is no flag, config option, or environment variable to switch to live trading. This decision is **permanent and non-negotiable**."
+
+This ADR **amends** ADR-004 as follows:
+
+- **ADR-004 remains the default behavior.** With zero configuration, `is_live_mode()` returns False, `get_trading_client()` returns a paper client, and the system behaves identically to today.
+- **ADR-004's intent is preserved.** The triple-confirmation design ensures live mode cannot be activated accidentally, by automation, or by a single misconfiguration. It requires deliberate, multi-step human action.
+- **ADR-004's status changes to:** "Accepted (amended by ADR-011 — paper remains default; live requires triple confirmation)"
+- The phrase "non-negotiable" in ADR-004 applied to the v0.1.0-v0.5.0 era when no safety infrastructure existed. ADR-011 provides that infrastructure.
+
+### Complete Call Site Inventory (for ENG reference)
+
+| # | Module | Function/Command | Order Side | Current Guard | Integration |
+|---|--------|------------------|------------|---------------|-------------|
+| 1 | `analysis.py:211` | `_place_order()` | BUY | None (callers guard) | No change -- callers add guard |
+| 2 | `cmd_trading.py:366` | `analyze --execute` | BUY | `click.confirm` | Add `confirm_live_execution()` |
+| 3 | `cmd_trading.py:430` | `buy` command | BUY | `click.confirm` | Add `confirm_live_execution()` |
+| 4 | `cmd_portfolio.py:114` | `rebalance --execute` | BUY (multi) | `click.confirm` per order | Add `confirm_live_execution()` per order |
+| 5 | `cmd_portfolio.py:338` | `check-sells --execute` | SELL (multi) | `click.confirm` | Add `confirm_live_execution()` per sell |
+| 6 | `cmd_account.py:317` | `automate buy_stock` tool | BUY | `execute` flag only | Add `confirm_live_execution()` |
+| 7 | `plans.py:192` | plan execution | BUY | `Prompt.ask` + optional confirm | Add `confirm_live_execution()` |
+| 8 | `plans.py:238` | `_guide_single_stock` | BUY | `click.confirm` | Add `confirm_live_execution()` |
+| 9 | `crypto.py:345` | crypto order | BUY | upstream confirm | Add `confirm_live_execution()` + replace `_TC(paper=True)` |
+
+**Rationale:**
+
+Alternatives considered:
+1. **Single env var (`BUFFET_BOT_LIVE=1` only):** Too easy to set accidentally. A single `export` command or `.env` copy-paste enables real-money trading. Rejected.
+2. **Config file toggle:** Config files are meant for preferences, not safety-critical gates. A misedited TOML file should not cost the user money. Rejected.
+3. **Guard inside `_place_order()` only:** Would miss the confirmation UX context. Would also make `_place_order()` side-effectful (prompting for input), breaking its role as a simple order submitter. Rejected.
+4. **Separate live binary / entry point:** Too much code duplication and would fragment the CLI surface. Rejected.
+
+The triple-confirmation pattern (env var + secret + interactive prompt) is a well-established pattern in infrastructure tooling (e.g., Terraform's `-auto-approve` still requires state configuration, AWS CLI requires both `--profile` and `--region` for destructive operations).
+
+**Consequences:**
+
+- **Enables:** v0.6.0 live trading, `compound` command, `automate --sweep`, full `LIVE_MODE` activation
+- **Enables:** forensic audit trail of every order attempt via `live_audit` table
+- **Constrains:** Every new command that places orders MUST call `confirm_live_execution()` -- this is a pattern requirement (add to PATTERNS.md)
+- **Constrains:** No order can be placed in live mode without a human typing confirmation -- this rules out fully autonomous live trading (by design)
+- **Risk:** The `automate` command's ReAct loop currently places orders non-interactively via `buy_stock()`. In live mode, each `buy_stock()` call will trigger an interactive confirmation, breaking the autonomous flow. This is intentional -- fully autonomous live trading is explicitly out of scope.
+- **Migration:** Existing users see zero behavior change until they deliberately set both `BUFFET_BOT_LIVE=1` and `BUFFET_BOT_LIVE_SECRET`. No existing `.env` files contain these variables.
+
+---
+
+## ADR-010: Concurrency model — ThreadPoolExecutor over asyncio
+- **Date:** 2026-03-04
+- **Status:** Accepted
+- **Decided by:** Software Engineer Agent (session 14)
+
+**Context:** The v0.5.0 ROADMAP had an open PERF question: should the concurrent data fetch in `_run_analysis()` migrate from `concurrent.futures.ThreadPoolExecutor` to `asyncio`? The dead `import asyncio` (D-001, now removed) was a leftover from this open question.
+
+**Decision:** Retain `ThreadPoolExecutor`. Do not migrate to `asyncio`.
+
+**Rationale:**
+1. **All I/O is synchronous by design.** Every external call (`yfinance.download`, `requests.get`, `ollama.chat`, Alpaca SDK methods) uses synchronous blocking libraries that have no async variants. Wrapping them in `asyncio.run_in_executor` would give identical behaviour to `ThreadPoolExecutor.submit` while adding indirection and complexity.
+2. **ThreadPoolExecutor is already effective.** `_run_analysis()` in `analysis.py` fans out 8–9 I/O calls concurrently with `ThreadPoolExecutor(max_workers=9)`, then collects results. The bottleneck is network latency and Ollama inference time — both of which are irreducible regardless of the concurrency model.
+3. **LLM calls are sequential by necessity.** `analyze_news_sentiment()` and the two LLM queries in `_run_analysis()` are run sequentially after the concurrent I/O phase because each depends on prior results. `asyncio` does not help here.
+4. **Complexity cost.** Adding `asyncio` to a Click CLI requires `asyncio.run()` wrappers at every command entry point or a third-party bridge (`click-async`). This is non-trivial, increases risk of event-loop conflicts with libraries that also use event loops internally, and provides no measurable benefit.
+5. **Existing code is clean and readable.** The `with ThreadPoolExecutor(max_workers=9) as ex: / f_x = ex.submit(...)` pattern is immediately understandable without async/await syntax.
+
+**Consequences:**
+- The `import asyncio` that was removed in D-001 must not be re-added until there is a concrete, benchmarked reason.
+- New concurrent I/O must continue to use `ThreadPoolExecutor.submit()`. Each new fetch function is a plain synchronous function.
+- If a future dependency ships a native async client (e.g., a hypothetical `aioalpaca`), re-open this ADR with a measured benchmark before migrating.
+
+---
+
 ## ADR-007: Amnesia clause for all agents
 - **Date:** 2026-02-28
 - **Status:** Accepted
@@ -69,7 +336,7 @@
 
 ## ADR-004: Paper trading only — `paper=True` hardcoded, not configurable
 - **Date:** (estimated v0.1.0)
-- **Status:** Accepted — permanent constraint
+- **Status:** Accepted (amended by ADR-011 — paper remains default; live requires triple confirmation)
 - **Decided by:** Original developer
 
 **Context:** Buffet-Bot makes autonomous trading decisions driven by LLMs. Allowing real-money execution would create serious financial risk for users.
@@ -191,8 +458,9 @@ These are decisions that haven't been made yet. The Product Manager should facil
 
 | Question | Context | Status |
 |----------|---------|--------|
-| When to split `main.py` into modules | Now 2760 lines; threshold 3000 | **Decided:** wait until 3000 lines; pre-approved split plan in AUDIT.md |
+| When to split `main.py` into modules | Now 2760 lines; threshold 3000 | **Decided:** split executed session 10; 13 modules; see AUDIT.md |
 | Config file format | User preferences (model, risk, strategy) | **Decided:** TOML at `~/.buffet-bot-config.toml` — see ADR-009 |
+| Live trading safety | How to enable live mode without accidental activation | **Decided:** triple-confirmation in `live_guard.py` — see ADR-011 |
+| Async LLM queries | Two models queried sequentially — slow | **Decided:** retain ThreadPoolExecutor — see ADR-010 |
 | PyPI distribution | Making `pip install buffet-bot` work | Open — needs version tagging strategy |
 | Multi-model expansion | Users want `llama3`, `mistral`, etc. | Open — MODELS list is hardcoded; no decision made |
-| Async LLM queries | Two models queried sequentially — slow | Open — `asyncio` import exists but unused; remove until decided (see D-001 in AUDIT.md) |

@@ -1,4 +1,4 @@
-"""CLI commands: rebalance, backtest, correlate, check_sells, var, forecast, whatif, scenarios, milestones."""
+"""CLI commands: rebalance, backtest, correlate, check_sells, var, forecast, whatif, scenarios, milestones, sectors."""
 import itertools
 from datetime import datetime, timedelta
 
@@ -14,7 +14,8 @@ from rich.prompt import Prompt
 from rich.table import Table
 from rich import box
 
-from buffet_bot.globals import console, MODELS, trading_client
+from buffet_bot.globals import console, MODELS, trading_client, LIVE_MODE
+from buffet_bot.live_guard import confirm_live_execution
 from buffet_bot.data import _complete_ticker
 from buffet_bot.display import _score_color, _make_panel_title
 from buffet_bot.risk import (
@@ -113,17 +114,22 @@ def rebalance(execute, include_cash):
 
     if execute and buys:
         console.print(f"\n[bold bright_cyan]Placing {len(buys)} buy order(s)...[/bold bright_cyan]")
+        mode_label = "LIVE" if LIVE_MODE else "Paper"
         for symbol, shares, price in buys:
-            if click.confirm(f"  BUY {shares}x {symbol} @ ~${price:.2f} (Paper)?", default=False):
-                try:
-                    order = MarketOrderRequest(
-                        symbol=symbol, qty=shares,
-                        side=OrderSide.BUY, time_in_force=TimeInForce.DAY,
-                    )
-                    result = trading_client.submit_order(order)
-                    console.print(f"  [bright_green]Order submitted: {result.id}[/bright_green]")
-                except Exception as e:
-                    console.print(f"  [bright_red]Order error: {e}[/bright_red]")
+            if click.confirm(f"  BUY {shares}x {symbol} @ ~${price:.2f} ({mode_label})?", default=False):
+                if confirm_live_execution(
+                    f"BUY {shares}x {symbol}", symbol, shares, "BUY",
+                    estimated_cost=shares * price,
+                ):
+                    try:
+                        order = MarketOrderRequest(
+                            symbol=symbol, qty=shares,
+                            side=OrderSide.BUY, time_in_force=TimeInForce.DAY,
+                        )
+                        result = trading_client.submit_order(order)
+                        console.print(f"  [bright_green]Order submitted: {result.id}[/bright_green]")
+                    except Exception as e:
+                        console.print(f"  [bright_red]Order error: {e}[/bright_red]")
     elif execute:
         console.print("[dim]No ADD trades needed — portfolio is balanced.[/dim]")
     else:
@@ -337,19 +343,24 @@ def check_sells(execute, tlh_pct):
 
     if execute and sell_flagged:
         console.print(f"\n[bold bright_red]Selling: {', '.join(p.symbol for p in sell_flagged)}[/bold bright_red]")
-        if click.confirm("Confirm sells? (Paper)"):
+        mode_label = "LIVE" if LIVE_MODE else "Paper"
+        if click.confirm(f"Confirm sells? ({mode_label})"):
             for pos in sell_flagged:
-                try:
-                    order  = MarketOrderRequest(
-                        symbol=pos.symbol,
-                        qty=int(float(pos.qty)),
-                        side=OrderSide.SELL,
-                        time_in_force=TimeInForce.DAY,
-                    )
-                    result = trading_client.submit_order(order)
-                    console.print(f"[bright_green]SELL {pos.symbol} submitted: {result.id}[/bright_green]")
-                except Exception as e:
-                    console.print(f"[bright_red]Error selling {pos.symbol}: {e}[/bright_red]")
+                qty = int(float(pos.qty))
+                if confirm_live_execution(
+                    f"SELL {qty}x {pos.symbol}", pos.symbol, qty, "SELL",
+                ):
+                    try:
+                        order  = MarketOrderRequest(
+                            symbol=pos.symbol,
+                            qty=qty,
+                            side=OrderSide.SELL,
+                            time_in_force=TimeInForce.DAY,
+                        )
+                        result = trading_client.submit_order(order)
+                        console.print(f"[bright_green]SELL {pos.symbol} submitted: {result.id}[/bright_green]")
+                    except Exception as e:
+                        console.print(f"[bright_red]Error selling {pos.symbol}: {e}[/bright_red]")
     elif sell_flagged and not execute:
         console.print("\n[dim bright_cyan]To execute these sells: buffet-bot check-sells --execute[/dim bright_cyan]")
 
@@ -732,3 +743,92 @@ def milestones(balance, monthly, annual_return):
             )
 
     console.print(tbl)
+
+
+@click.command()
+@click.option('--chart/--no-chart', 'show_chart', default=True, show_default=True,
+              help='Display plotext horizontal bar chart after the table.')
+def sectors(show_chart):
+    """Sector allocation breakdown for current portfolio: buffet-bot sectors
+
+    \b
+    Fetches GICS sector for every open position via yfinance, then shows
+    a weighted table and a plotext bar chart so you can spot concentration risk.
+    """
+    try:
+        positions = trading_client.get_all_positions()
+    except Exception as e:
+        console.print(f"[bright_red]Could not fetch positions: {e}[/bright_red]")
+        return
+
+    if not positions:
+        console.print("[bright_yellow]No open positions.[/bright_yellow]")
+        return
+
+    total_value = sum(float(p.market_value) for p in positions)
+    if total_value <= 0:
+        console.print("[bright_red]Portfolio value is zero.[/bright_red]")
+        return
+
+    # Fetch sector for every position (best-effort — Unknown if yfinance fails)
+    sector_value: dict = {}
+    sector_tickers: dict = {}
+    with console.status("[dim]Fetching sector info...[/dim]"):
+        for pos in positions:
+            sym = pos.symbol
+            mv  = float(pos.market_value)
+            try:
+                sector = yf.Ticker(sym).info.get('sector') or 'Unknown'
+            except Exception:
+                sector = 'Unknown'
+            sector_value[sector]   = sector_value.get(sector, 0.0) + mv
+            sector_tickers.setdefault(sector, []).append(sym)
+
+    # Sort by value descending
+    sorted_sectors = sorted(sector_value.items(), key=lambda x: x[1], reverse=True)
+
+    tbl = Table(
+        title="[bold bright_cyan]Portfolio Sector Allocation[/bold bright_cyan]",
+        box=box.ROUNDED, header_style="bold bright_cyan",
+    )
+    tbl.add_column("Sector",   style="bold bright_cyan", no_wrap=True)
+    tbl.add_column("Tickers",  style="dim bright_white")
+    tbl.add_column("Value",    justify="right", style="bright_white")
+    tbl.add_column("Weight",   justify="right", style="bright_white")
+    tbl.add_column("Risk",     justify="center", style="bright_white")
+
+    for sector, val in sorted_sectors:
+        pct   = val / total_value
+        color = "bright_green" if pct < 0.30 else "bright_yellow" if pct < 0.50 else "bright_red"
+        risk  = "[bright_green]OK[/bright_green]" if pct < 0.30 else \
+                "[bright_yellow]WATCH[/bright_yellow]" if pct < 0.50 else \
+                "[bright_red]CONCENTRATED[/bright_red]"
+        tickers_str = ", ".join(sector_tickers.get(sector, []))
+        tbl.add_row(
+            sector,
+            tickers_str,
+            f"${val:,.2f}",
+            f"[{color}]{pct:.1%}[/{color}]",
+            risk,
+        )
+
+    console.print(Panel(
+        f"Total portfolio value: [bold bright_white]${total_value:,.2f}[/bold bright_white]  |  "
+        f"Sectors: [bold bright_white]{len(sorted_sectors)}[/bold bright_white]  |  "
+        f"Positions: [bold bright_white]{len(positions)}[/bold bright_white]",
+        title=_make_panel_title("Sector Overview", "bright_cyan"),
+        border_style="bright_cyan", box=box.ROUNDED,
+    ))
+    console.print(tbl)
+
+    if show_chart and sorted_sectors:
+        labels = [s for s, _ in sorted_sectors]
+        values = [round(v / total_value * 100, 1) for _, v in sorted_sectors]
+        try:
+            plt.clf()
+            plt.bar(labels, values, orientation='horizontal', color='cyan')
+            plt.title("Sector Allocation (%)")
+            plt.xlabel("Portfolio Weight (%)")
+            plt.show()
+        except Exception as e:
+            console.print(f"[dim]Chart unavailable: {e}[/dim]")

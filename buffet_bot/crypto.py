@@ -348,11 +348,15 @@ JSON only: {{"action": "BUY|SELL|HOLD", "confidence": 0.75, "usd_amount": 200, "
                     console.print(f"[red]Coinbase order error: {e}[/red]")
             else:
                 try:
-                    from alpaca.trading.client import TradingClient as _TC
                     from alpaca.trading.requests import MarketOrderRequest as _MOR
                     from alpaca.trading.enums import OrderSide as _OS, TimeInForce as _TIF
-                    _client = _TC(os.getenv("ALPACA_API_KEY"), os.getenv("ALPACA_SECRET_KEY"),
-                                  paper=True)
+                    from buffet_bot.live_guard import get_trading_client, confirm_live_execution
+                    if not confirm_live_execution(
+                        f"BUY ${usd_amount:.2f} of {symbol}", symbol,
+                        1, "BUY", estimated_cost=usd_amount,
+                    ):
+                        return
+                    _client = get_trading_client()
                     alpaca_sym = symbol.replace("/", "")
                     order = _MOR(
                         symbol=alpaca_sym,
@@ -361,6 +365,6 @@ JSON only: {{"action": "BUY|SELL|HOLD", "confidence": 0.75, "usd_amount": 200, "
                         time_in_force=_TIF.GTC,
                     )
                     result = _client.submit_order(order)
-                    console.print(f"[bold green]Alpaca paper crypto order: {result.id}[/bold green]")
+                    console.print(f"[bold green]Alpaca crypto order: {result.id}[/bold green]")
                 except Exception as e:
                     console.print(f"[red]Alpaca order error: {e}[/red]")

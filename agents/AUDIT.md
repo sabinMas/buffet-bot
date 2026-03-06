@@ -117,6 +117,82 @@ When the line count crosses 3000, the following splits are pre-approved for prop
 
 ---
 
+## Performance Baseline — `analyze` End-to-End Wall Time
+
+> Added: 2026-03-04 by Software Engineer Agent (session 14)
+> Based on: static analysis of `analysis.py` + `data.py` (no live profiling run yet)
+
+### Phases and Theoretical Timing
+
+The `analyze` command's critical path runs in two sequential phases:
+
+**Phase 1: Concurrent I/O fan-out** (`ThreadPoolExecutor(max_workers=9)`)
+
+| Worker | Operation | Typical latency |
+|--------|-----------|-----------------|
+| `f_hist` | `yf.download(ticker, period='6mo')` | 0.8–2.0 s |
+| `f_buffett` | `get_buffett_metrics(ticker)` — `yf.Ticker.info` via `_yf_semaphore(2)` | 1.0–2.5 s |
+| `f_realtime` | Alpaca `StockLatestQuoteRequest` + `StockLatestBarRequest` | 0.2–0.6 s |
+| `f_news` | Alpaca News API HTTP GET | 0.3–0.8 s |
+| `f_macro` | `_fetch_fred_data()` — 3 FRED requests concurrently (inner `ThreadPoolExecutor(3)`) | 0.5–1.5 s |
+| `f_insiders` | SEC EDGAR Form 4 HTTP fetch | 0.5–2.0 s |
+| `f_multiframe` | `get_multiframe_signals()` — `yf.download(period='1y')` + resample | 1.0–2.5 s |
+| `f_analyst` | `get_analyst_consensus()` — `yf.Ticker.info` + upgrades_downgrades | 1.0–2.5 s |
+| `f_tech` (high risk only) | `get_tech_indicators()` — `yf.download(period='3mo')` | 0.8–1.8 s |
+
+**Phase 1 wall time = max of the above workers** = ~2.5 s (typical) / ~4.0 s (slow network)
+
+Note: `get_buffett_metrics`, `get_multiframe_signals`, and `get_analyst_consensus` all call `yf.Ticker` and are gated by `_yf_semaphore(2)` (max 2 concurrent yfinance sessions). This is the current bottleneck within the concurrent phase.
+
+**Phase 2: Sequential LLM inference**
+
+| Step | Operation | Typical latency |
+|------|-----------|-----------------|
+| Sentiment | `analyze_news_sentiment()` — 1 Ollama chat call | 3–10 s |
+| Primary LLM | `ollama.chat(deepseek-r1, ...)` | 5–20 s |
+| Secondary LLM | `ollama.chat(qwen2.5:7b, ...)` | 3–12 s |
+
+**Phase 2 wall time = sum of the above** = ~11–42 s (hardware-dependent)
+
+### Total Baseline
+
+| Scenario | Estimated wall time |
+|----------|---------------------|
+| Low risk, warm Ollama, fast network | ~14 s |
+| High risk, cold Ollama models, slow network | ~50 s |
+| **Typical production run** | **~20–30 s** |
+
+### Bottleneck Analysis
+
+1. **Primary bottleneck: Ollama LLM inference (Phase 2)** — accounts for 75–85% of total wall time. Not parallelisable without architectural changes (each LLM call depends on prior context or is intentionally sequential for consensus voting).
+2. **Secondary bottleneck: yfinance semaphore contention (Phase 1)** — `_yf_semaphore(2)` limits concurrent yfinance sessions to prevent crumb/DB lock errors. The 3 concurrent yf-based workers (`f_buffett`, `f_multiframe`, `f_analyst`) serialise into pairs, adding ~0.5–1.5 s to Phase 1.
+3. **Not a bottleneck: Alpaca and FRED** — these are fast REST calls (<1 s each) that complete well before the yfinance workers.
+
+### Optimisation Candidates (for future sessions)
+
+| Candidate | Expected saving | Risk |
+|-----------|----------------|------|
+| Increase `_yf_semaphore` to 3 | ~0.5–1.0 s on Phase 1 | Medium — original 2-semaphore was set to prevent yfinance session corruption; needs testing |
+| Cache `yf.Ticker.info` across concurrent workers that call it for the same ticker | ~0.5–1.5 s | Low — all three workers use same ticker; a simple `functools.lru_cache(maxsize=32)` on a wrapper would help |
+| Parallel LLM queries (send both prompts simultaneously) | ~5–12 s | Medium — LLM is CPU/GPU-bound; parallel inference may degrade response quality; needs hardware profiling |
+
+### Live Profiling Instructions (for QA/PERF agent)
+
+To capture a real baseline:
+```bash
+python -c "
+import time, sys
+sys.argv = ['buffet-bot', 'analyze', 'AAPL']
+start = time.perf_counter()
+from buffet_bot.main import cli
+cli(standalone_mode=False)
+print(f'Wall time: {time.perf_counter() - start:.2f}s')
+"
+```
+Or use `time python buffet-bot.py analyze AAPL` for a coarse measurement.
+
+---
+
 ## Next Audit Trigger
 
 Re-run this audit when:

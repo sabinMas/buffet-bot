@@ -20,8 +20,10 @@ from rich import box
 
 from buffet_bot.globals import (
     API_KEY, SECRET_KEY, trading_client, console,
-    MODELS, MODEL_COLORS, ALPACA_PAPER_BASE, _CONFIG,
+    MODELS, MODEL_COLORS, ALPACA_PAPER_BASE, _CONFIG, ensure_ollama_running,
+    LIVE_MODE,
 )
+from buffet_bot.live_guard import confirm_live_execution
 from buffet_bot.db import get_watchlist
 from buffet_bot.data import (
     get_buffett_metrics, get_realtime_data, get_recent_news,
@@ -258,6 +260,8 @@ def browse(query, sector, limit, full_universe):
               help='Output result as JSON (suppresses Rich output).')
 def analyze(ticker, risk, dry_run, primary_model, strategy, as_json):
     """Analyze stock or crypto: buffet-bot analyze AAPL / buffet-bot analyze BTC/USD"""
+    if not ensure_ollama_running():
+        return
     ticker = ticker.upper()
     cfg = _CONFIG['defaults']
     if primary_model is None: primary_model = cfg.get('model', MODELS[0])
@@ -361,12 +365,19 @@ def analyze(ticker, risk, dry_run, primary_model, strategy, as_json):
             sizing = None
 
     if not dry_run and result['consensus'] == 'BUY':
-        if click.confirm(f'Execute BUY {ticker}? (Paper)'):
+        mode_label = "LIVE" if LIVE_MODE else "Paper"
+        if click.confirm(f'Execute BUY {ticker}? ({mode_label})'):
             if result['best_buy_resp']:
                 best = dict(result['best_buy_resp'])
                 if sizing:
                     best['qty'] = sizing['qty']
-                _place_order(ticker, best)
+                qty = best.get('qty', 1)
+                price = result.get('realtime', {}).get('price', 0) or 0
+                if confirm_live_execution(
+                    f"BUY {qty}x {ticker}", ticker, qty, "BUY",
+                    estimated_cost=qty * price,
+                ):
+                    _place_order(ticker, best)
             else:
                 console.print("[yellow]No valid BUY signal[/yellow]")
 
@@ -424,11 +435,18 @@ def buy(ticker, risk, primary_model, strategy):
     except Exception:
         sizing = None
 
-    if click.confirm(f'Execute BUY {ticker}? (Paper)'):
+    mode_label = "LIVE" if LIVE_MODE else "Paper"
+    if click.confirm(f'Execute BUY {ticker}? ({mode_label})'):
         best = dict(result['best_buy_resp'])
         if sizing:
             best['qty'] = sizing['qty']
-        _place_order(ticker, best)
+        qty = best.get('qty', 1)
+        price = result.get('realtime', {}).get('price', 0) or 0
+        if confirm_live_execution(
+            f"BUY {qty}x {ticker}", ticker, qty, "BUY",
+            estimated_cost=qty * price,
+        ):
+            _place_order(ticker, best)
 
 
 @click.command()
@@ -482,12 +500,38 @@ def history(limit, ticker, order_status):
     console.print(table)
 
 
+def _fetch_spy_benchmark(start_date: str, end_date: str, start_equity: float) -> list[float] | None:
+    """Fetch SPY price history and normalise to start_equity. Returns list or None."""
+    try:
+        spy = yf.download('SPY', start=start_date, end=end_date, progress=False)['Close']
+        if spy.empty or len(spy) < 2:
+            return None
+        spy_values = spy.values.flatten()
+        normalised = [start_equity * (v / spy_values[0]) for v in spy_values]
+        return normalised
+    except Exception:
+        return None
+
+
+def _annualised_cagr(start_val: float, end_val: float, n_days: int) -> float | None:
+    """Compute CAGR as a percentage given start/end values and number of calendar days."""
+    if start_val <= 0 or n_days <= 0:
+        return None
+    years = n_days / 365.25
+    try:
+        return round((end_val / start_val) ** (1 / years) * 100 - 100, 2)
+    except Exception:
+        return None
+
+
 @click.command()
 @click.option('--period', default='1M',
               type=click.Choice(['1D', '1W', '1M', '3M', '6M', '1A']),
               show_default=True, help='History period.')
-def portfolio(period):
-    """Show a terminal line chart of portfolio equity over time."""
+@click.option('--no-benchmark', is_flag=True, default=False,
+              help='Hide SPY buy-and-hold benchmark overlay.')
+def portfolio(period, no_benchmark):
+    """Show a terminal line chart of portfolio equity over time with SPY benchmark."""
     url = f"{ALPACA_PAPER_BASE}/v2/account/portfolio/history"
     headers = {
         'APCA-API-KEY-ID': API_KEY,
@@ -522,20 +566,64 @@ def portfolio(period):
     pnl_color = "bright_green" if pnl >= 0 else "bright_red"
     pnl_sign = "+" if pnl >= 0 else ""
 
+    # SPY benchmark — normalised to portfolio start value
+    spy_values = None
+    if not no_benchmark and len(dates) >= 2:
+        spy_values = _fetch_spy_benchmark(dates[0], dates[-1], float(equity[0]))
+
     try:
         plt.clf()
-        plt.plot(list(dates), [float(e) for e in equity], color='cyan', marker='dot')
-        plt.title(f"Portfolio Equity — {period}")
+        plt.plot(list(dates), [float(e) for e in equity], color='cyan',
+                 marker='dot', label='Portfolio')
+        if spy_values and len(spy_values) >= 2:
+            # SPY series may have more/fewer trading days than portfolio timestamps
+            # Sample SPY to match portfolio length by linear index mapping
+            port_len = len(equity)
+            spy_len = len(spy_values)
+            if spy_len != port_len:
+                indices = [int(i * (spy_len - 1) / max(port_len - 1, 1)) for i in range(port_len)]
+                spy_sampled = [spy_values[i] for i in indices]
+            else:
+                spy_sampled = spy_values
+            plt.plot(list(dates), spy_sampled, color='yellow',
+                     marker='dot', label='SPY (buy & hold)')
+        plt.title(f"Portfolio vs SPY — {period}")
         plt.xlabel("Date")
         plt.ylabel("USD")
         plt.show()
     except Exception as e:
         console.print(f"[bright_red]Chart error: {e}[/bright_red]")
 
+    # Compute CAGR/alpha metrics
+    from datetime import datetime as _dt
+    try:
+        n_days = (_dt.strptime(dates[-1], '%Y-%m-%d') - _dt.strptime(dates[0], '%Y-%m-%d')).days
+    except Exception:
+        n_days = 0
+
+    port_cagr = _annualised_cagr(float(equity[0]), float(equity[-1]), n_days)
+    spy_end = spy_values[-1] if spy_values else None
+    spy_cagr = _annualised_cagr(float(equity[0]), spy_end, n_days) if spy_end else None
+
+    cagr_str = f"  CAGR: [bold bright_cyan]{port_cagr:+.2f}%[/bold bright_cyan]" if port_cagr is not None else ""
+    if spy_cagr is not None and port_cagr is not None:
+        alpha = round(port_cagr - spy_cagr, 2)
+        alpha_color = "bright_green" if alpha >= 0 else "bright_red"
+        alpha_sign = "+" if alpha >= 0 else ""
+        spy_str = (
+            f"  SPY CAGR: [bold bright_yellow]{spy_cagr:+.2f}%[/bold bright_yellow]"
+            f"  Alpha: [{alpha_color}][bold]{alpha_sign}{alpha:.2f}%[/bold][/{alpha_color}]"
+        )
+    elif spy_cagr is not None:
+        spy_str = f"  SPY CAGR: [bold bright_yellow]{spy_cagr:+.2f}%[/bold bright_yellow]"
+    else:
+        spy_str = ""
+
     console.print(
         f"\nStart: [bold bright_white]${float(equity[0]):,.2f}[/bold bright_white]  "
         f"Current: [bold bright_white]${float(equity[-1]):,.2f}[/bold bright_white]  "
         f"P&L: [{pnl_color}][bold]{pnl_sign}${pnl:,.2f}[/bold][/{pnl_color}]"
+        f"{cagr_str}{spy_str}"
     )
 
 
@@ -620,6 +708,8 @@ def chat(primary_model):
               help='Minimum Buffett score to include in --notify BUY CANDIDATES list.')
 def scan(use_watchlist, top, as_json, as_notify, min_score):
     """Scan top stocks for Buffett opportunities"""
+    if not ensure_ollama_running():
+        return
     default_tickers = ['AAPL', 'MSFT', 'GOOGL', 'BRK-B', 'JNJ', 'V', 'JPM', 'PG']
     if use_watchlist:
         saved = get_watchlist()
@@ -727,6 +817,20 @@ def status():
     """Check account status — Alpaca paper, Coinbase, and IBKR if configured."""
     from buffet_bot.crypto import get_coinbase_balance
     from buffet_bot.ibkr import get_ibkr_status
+
+    # Trading mode banner
+    if LIVE_MODE:
+        console.print(Panel(
+            "[bold bright_red] LIVE TRADING MODE [/bold bright_red]\n"
+            "[bright_red]Real money orders are ENABLED.[/bright_red]",
+            border_style="bright_red", box=box.HEAVY,
+        ))
+    else:
+        console.print(Panel(
+            "[bold bright_green] PAPER TRADING MODE [/bold bright_green]\n"
+            "[dim]All orders are simulated. No real money at risk.[/dim]",
+            border_style="bright_green", box=box.ROUNDED,
+        ))
 
     account = trading_client.get_account()
     console.print(Panel(
@@ -954,3 +1058,216 @@ def dashboard(tickers, interval):
             time.sleep(interval)
     except KeyboardInterrupt:
         console.print("\n[dim]Dashboard stopped.[/dim]")
+
+
+# ── compare ───────────────────────────────────────────────────────────────────
+
+@click.command()
+@click.argument('ticker_a', shell_complete=_complete_ticker)
+@click.argument('ticker_b', shell_complete=_complete_ticker)
+def compare(ticker_a, ticker_b):
+    """Side-by-side Buffett score comparison: buffet-bot compare AAPL MSFT"""
+    ticker_a = ticker_a.upper()
+    ticker_b = ticker_b.upper()
+
+    console.print(Panel(
+        f"Fetching Buffett metrics for [bold bright_cyan]{ticker_a}[/bold bright_cyan] "
+        f"vs [bold bright_magenta]{ticker_b}[/bold bright_magenta] ...",
+        title=_make_panel_title("Buffett Score Comparison", "bright_cyan"),
+        border_style="bright_cyan", box=box.ROUNDED,
+    ))
+
+    with console.status("[dim]Fetching metrics (concurrent)...[/dim]", spinner="dots"):
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            fut_a = pool.submit(get_buffett_metrics, ticker_a)
+            fut_b = pool.submit(get_buffett_metrics, ticker_b)
+            metrics_a = fut_a.result()
+            metrics_b = fut_b.result()
+
+    # Metric rows: (label, key_in_metrics, display_unit, higher_is_better)
+    ROWS = [
+        ("Buffett Score",  "score",      "pts",  True),
+        ("ROE",            "roe",        "%",    True),
+        ("ROIC (ROA)",     "roic",       "%",    True),
+        ("Debt / Equity",  "debt_eq",    "",     False),
+        ("Op. Margin",     "op_margin",  "%",    True),
+        ("FCF Yield",      "fcf_yield",  "%",    True),
+        ("P/E Ratio",      "pe",         "x",    False),
+        ("P/B Ratio",      "pb",         "x",    False),
+        ("Div. Yield",     "div_yield",  "%",    True),
+        ("Beta",           "beta",       "",     False),
+        ("Earnings Gr.",   "eg_1y",      "%",    True),
+    ]
+
+    # pass/fail keys (absent means no pass/fail badge for that row)
+    PASS_KEYS = {
+        "score":     None,
+        "roe":       "roe_pass",
+        "roic":      "roic_pass",
+        "debt_eq":   "debt_pass",
+        "op_margin": "margin_pass",
+        "fcf_yield": "fcf_pass",
+        "pe":        "pe_pass",
+        "pb":        "pb_pass",
+        "div_yield": "div_pass",
+        "beta":      None,
+        "eg_1y":     None,
+    }
+
+    score_a = metrics_a.get("score", 0)
+    score_b = metrics_b.get("score", 0)
+    winner  = ticker_a if score_a > score_b else (ticker_b if score_b > score_a else None)
+
+    tbl = Table(
+        title=(
+            f"[bold bright_cyan]{ticker_a}[/bold bright_cyan]"
+            f"  vs  "
+            f"[bold bright_magenta]{ticker_b}[/bold bright_magenta]"
+            + (f"   |   Winner: [bold bright_green]{winner}[/bold bright_green]"
+               if winner else "   |   [bold bright_yellow]Tie[/bold bright_yellow]")
+        ),
+        box=box.ROUNDED,
+        header_style="bold bright_white",
+        show_lines=False,
+    )
+    tbl.add_column("Metric",         style="dim bright_white", min_width=16)
+    tbl.add_column(ticker_a,         justify="right",          min_width=14, style="bright_cyan")
+    tbl.add_column(ticker_b,         justify="right",          min_width=14, style="bright_magenta")
+    tbl.add_column("Edge",           justify="center",         min_width=10)
+
+    def _fmt(val, unit):
+        if val is None:
+            return "N/A"
+        if unit in ("%", "pts"):
+            return f"{val:.1f}{unit}"
+        if unit == "x":
+            return f"{val:.2f}x"
+        return f"{val:.2f}"
+
+    def _pass_badge(metrics, pass_key):
+        if pass_key is None:
+            return ""
+        passed = metrics.get(pass_key, False)
+        return "[bright_green]PASS[/bright_green]" if passed else "[bright_red]FAIL[/bright_red]"
+
+    for label, key, unit, higher_is_better in ROWS:
+        val_a = metrics_a.get(key)
+        val_b = metrics_b.get(key)
+        pass_key = PASS_KEYS.get(key)
+
+        str_a = _fmt(val_a, unit)
+        str_b = _fmt(val_b, unit)
+
+        # Add pass/fail badge if applicable
+        badge_a = _pass_badge(metrics_a, pass_key)
+        badge_b = _pass_badge(metrics_b, pass_key)
+        if badge_a:
+            str_a = f"{str_a}  {badge_a}"
+        if badge_b:
+            str_b = f"{str_b}  {badge_b}"
+
+        # Determine edge winner for this metric
+        edge = ""
+        if val_a is not None and val_b is not None and val_a != val_b and key != "score":
+            if higher_is_better:
+                better_ticker = ticker_a if val_a > val_b else ticker_b
+            else:
+                better_ticker = ticker_a if val_a < val_b else ticker_b
+            edge_color = "bright_cyan" if better_ticker == ticker_a else "bright_magenta"
+            edge = f"[{edge_color}]{better_ticker}[/{edge_color}]"
+        elif key == "score":
+            if score_a > score_b:
+                edge = f"[bright_cyan]{ticker_a}[/bright_cyan]"
+            elif score_b > score_a:
+                edge = f"[bright_magenta]{ticker_b}[/bright_magenta]"
+            else:
+                edge = "[bright_yellow]Tie[/bright_yellow]"
+
+        # Bold the score row
+        if key == "score":
+            sc_a = _score_color(score_a)
+            sc_b = _score_color(score_b)
+            tbl.add_row(
+                f"[bold]{label}[/bold]",
+                f"[bold {sc_a}]{score_a}/100[/bold {sc_a}]",
+                f"[bold {sc_b}]{score_b}/100[/bold {sc_b}]",
+                edge,
+            )
+        else:
+            tbl.add_row(label, str_a, str_b, edge)
+
+    console.print(tbl)
+
+    # Verdict summary
+    if winner:
+        loser = ticker_b if winner == ticker_a else ticker_a
+        margin = abs(score_a - score_b)
+        win_color = "bright_cyan" if winner == ticker_a else "bright_magenta"
+        console.print(
+            f"\n[bold {win_color}]{winner}[/bold {win_color}] leads by "
+            f"[bold bright_white]{margin} points[/bold bright_white] on the Buffett scorecard. "
+            f"Run [dim]buffet-bot analyze {winner}[/dim] for a full LLM analysis."
+        )
+    else:
+        console.print(
+            f"\n[bold bright_yellow]{ticker_a} and {ticker_b} are tied.[/bold bright_yellow] "
+            f"Run [dim]buffet-bot analyze {ticker_a}[/dim] or [dim]buffet-bot analyze {ticker_b}[/dim] "
+            f"for a full LLM analysis."
+        )
+
+
+# ── explain ───────────────────────────────────────────────────────────────────
+
+@click.command()
+@click.argument('concept')
+@click.option('--model', 'primary_model', default='deepseek-r1', type=click.Choice(MODELS))
+def explain(concept, primary_model):
+    """Ask the AI to explain a metric or investing concept: buffet-bot explain "P/E ratio"
+
+    \b
+    Examples:
+      buffet-bot explain "P/E ratio"
+      buffet-bot explain "debt to equity"
+      buffet-bot explain "FCF yield" --model qwen2.5:7b
+      buffet-bot explain ROIC
+    """
+    if not ensure_ollama_running():
+        console.print("[bright_red]Ollama is not running. Start it with: ollama serve[/bright_red]")
+        return
+
+    prompt = (
+        f"You are Warren Buffett's personal investing tutor. "
+        f"Explain the following financial metric or investing concept in plain language. "
+        f"Include: what it measures, why it matters to value investors, "
+        f"what a good vs bad value looks like, and a concrete example.\n\n"
+        f"Concept: {concept}"
+    )
+
+    console.print(Panel(
+        f"Explaining: [bold bright_white]{concept}[/bold bright_white]",
+        title=_make_panel_title("Investing Concept", "bright_cyan"),
+        border_style="bright_cyan", box=box.ROUNDED,
+    ))
+
+    with console.status(f"[dim]{primary_model} is thinking...[/dim]", spinner="dots"):
+        try:
+            resp = ollama.chat(
+                model=primary_model,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            explanation = resp["message"]["content"]
+        except Exception as e:
+            console.print(f"[bright_red]LLM error: {e}[/bright_red]")
+            return
+
+    color = MODEL_COLORS.get(primary_model, 'bright_cyan')
+    if color == 'cyan':
+        color = 'bright_cyan'
+    elif color == 'magenta':
+        color = 'bright_magenta'
+
+    console.print(Panel(
+        explanation,
+        title=_make_panel_title(f"{primary_model} — {concept}", color),
+        border_style=color, box=box.ROUNDED,
+    ))

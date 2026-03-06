@@ -1,6 +1,5 @@
 """CLI commands: guide, plans, automate, config, alerts, watchlist, beats, completion."""
 import os
-import requests as _requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
@@ -13,8 +12,10 @@ from rich import box
 
 from buffet_bot.globals import (
     console, MODELS, PLANS_DIR, CONFIG_PATH,
-    _CONFIG_DEFAULTS, _load_config, trading_client,
+    _CONFIG_DEFAULTS, _load_config, trading_client, ensure_ollama_running,
+    LIVE_MODE,
 )
+from buffet_bot.live_guard import confirm_live_execution
 from buffet_bot.display import _make_panel_title
 try:
     import tomli_w
@@ -226,7 +227,7 @@ def plans(run_plan, delete_plan, set_schedule, run_due, primary_model):
 
 # ── automate ──────────────────────────────────────────────────────────────────
 
-def _build_automate_tools(execute: bool, budget: float, primary_model: str, risk: str = 'medium', strategy: str = 'value') -> dict:
+def _build_automate_tools(execute: bool, budget: float, primary_model: str, risk: str = 'medium', strategy: str = 'value', speculative: bool = False) -> dict:
     """Return the tool registry for the automate agent loop."""
     spent = [0.0]  # mutable closure for budget tracking
 
@@ -327,6 +328,11 @@ def _build_automate_tools(execute: bool, budget: float, primary_model: str, risk
                 'executed': False,
                 'reason':   f'exceeds budget (${spent[0]:.2f} spent of ${budget:.2f})',
             }
+        if not confirm_live_execution(
+            f"BUY {qty}x {ticker}", ticker, qty, "BUY",
+            estimated_cost=cost,
+        ):
+            return {'executed': False, 'reason': 'live execution not confirmed'}
         _place_order(ticker, {'qty': qty})
         spent[0] += cost
         return {
@@ -337,7 +343,21 @@ def _build_automate_tools(execute: bool, budget: float, primary_model: str, risk
             'total_spent':    round(spent[0], 2),
         }
 
-    return {
+    def scan_speculative_stocks(top=10):
+        from buffet_bot.volatile import scan_volatile, VOLATILE_UNIVERSE
+        results = scan_volatile(universe=VOLATILE_UNIVERSE, n=int(top))
+        return [
+            {
+                'ticker':    r['ticker'],
+                'vol_score': r['score'],
+                'beta':      r.get('beta', 0),
+                'short_pct': r.get('short_pct', 0),
+                'vol_30d':   r.get('vol_30d', 0),
+            }
+            for r in results
+        ]
+
+    base_tools = {
         'scan_stocks': {
             'description': 'Scan default watchlist for Buffett-scored opportunities',
             'params':      'top=5',
@@ -379,6 +399,13 @@ def _build_automate_tools(execute: bool, budget: float, primary_model: str, risk
             'fn':          buy_stock,
         },
     }
+    if speculative:
+        base_tools['scan_speculative_stocks'] = {
+            'description': 'Scan the volatile/speculative universe (meme stocks, small-cap, high-beta) ranked by volatility score',
+            'params':      'top=10',
+            'fn':          scan_speculative_stocks,
+        }
+    return base_tools
 
 
 @click.command()
@@ -395,9 +422,11 @@ def _build_automate_tools(execute: bool, budget: float, primary_model: str, risk
 @click.option('--risk', default=None, type=click.Choice(['low', 'medium', 'high']),
               help='Risk appetite (low/medium/high). Prompted if omitted in wizard mode.')
 @click.option('--strategy', default=None,
-              type=click.Choice(['value', 'growth', 'dividend', 'turnaround']),
+              type=click.Choice(['value', 'growth', 'dividend', 'turnaround', 'speculative']),
               help='Investing strategy. Prompted if omitted in wizard mode.')
-def automate(goal, execute, budget, max_steps, primary_model, risk, strategy):
+@click.option('--speculative', 'speculative', is_flag=True, default=False,
+              help='Enable speculative/volatile stock scanning (penny stocks, high-beta, short-squeeze candidates).')
+def automate(goal, execute, budget, max_steps, primary_model, risk, strategy, speculative):
     """AI agent that autonomously chains buffet-bot tools to accomplish a goal.
 
     \b
@@ -407,21 +436,19 @@ def automate(goal, execute, budget, max_steps, primary_model, risk, strategy):
       buffet-bot automate "invest $500 in the best stock" --execute --budget 500 --risk high
       buffet-bot automate "should I sell anything?" --max-steps 5
     """
-    try:
-        _requests.get("http://localhost:11434", timeout=2)
-    except Exception:
-        console.print(Panel(
-            "[bold red]Ollama is not running.[/bold red]\n\n"
-            "Start it in a separate terminal:\n"
-            "  [cyan]ollama serve[/cyan]\n\n"
-            "Then verify models are pulled:\n"
-            "  [cyan]ollama pull deepseek-r1[/cyan]\n"
-            "  [cyan]ollama pull qwen2.5:7b[/cyan]",
-            title="[bold red]Connection Error[/bold red]",
-            border_style="red",
-        ))
+    if not ensure_ollama_running():
         return
-    if not goal:
+    if speculative and not goal:
+        # Fast path: --speculative with no goal skips the wizard
+        if not risk:
+            risk = 'high'
+        if not strategy:
+            strategy = 'speculative'
+        goal = (
+            f"Scan the volatile/speculative universe for top momentum plays. "
+            f"Use a ${budget:.2f} budget with tight stops."
+        )
+    elif not goal:
         console.print(Panel(
             "Let's set up your automated investing session.",
             title="[bold cyan]Buffet-Bot Automate[/bold cyan]",
@@ -446,11 +473,13 @@ def automate(goal, execute, budget, max_steps, primary_model, risk, strategy):
     else:
         if not risk:
             risk = 'medium'
-        if not strategy:
+        if speculative and not strategy:
+            strategy = 'speculative'
+        elif not strategy:
             strategy = 'value'
 
     tools = _build_automate_tools(execute=execute, budget=budget, primary_model=primary_model,
-                                   risk=risk, strategy=strategy)
+                                   risk=risk, strategy=strategy, speculative=speculative)
 
     console.print(Panel(
         f"[bold]Goal:[/bold] {goal}\n"
@@ -846,3 +875,306 @@ def completion(shell):
         title="[bold]Shell Completion Setup[/bold]",
         border_style="cyan",
     ))
+
+
+# ── automate-crypto ────────────────────────────────────────────────────────────
+
+def _build_crypto_tools(execute: bool, budget: float, primary_model: str) -> dict:
+    """Return the tool registry for the automate-crypto agent loop."""
+    spent = [0.0]
+
+    def scan_cryptos(top=5):
+        from buffet_bot.crypto import CRYPTO_SYMBOLS, get_crypto_volatility
+        results = []
+        for sym in CRYPTO_SYMBOLS:
+            v = get_crypto_volatility(sym)
+            if v:
+                results.append({'symbol': sym, **v})
+        results.sort(key=lambda x: abs(x.get('return_30d', 0)), reverse=True)
+        return results[:int(top)]
+
+    def analyze_crypto_asset(symbol):
+        from buffet_bot.crypto import get_crypto_bars, get_crypto_quote, get_crypto_volatility
+        import ollama as _ollama_inner
+        bars  = get_crypto_bars(symbol, days=14)
+        quote = get_crypto_quote(symbol)
+        vol   = get_crypto_volatility(symbol) or {}
+        price = quote.get('mid', vol.get('last_price', 0))
+        prompt = (
+            f"Crypto: {symbol}\n"
+            f"Current price: ${price:.4f}\n"
+            f"30d return: {vol.get('return_30d', 0):.1f}%\n"
+            f"Annualized vol: {vol.get('vol_30d_annualized', 0):.1f}%\n"
+            f"Max drawdown: {vol.get('max_drawdown', 0):.1f}%\n\n"
+            "Reply ONLY with JSON: "
+            "{\"action\":\"BUY|SELL|HOLD\",\"confidence\":0.0-1.0,"
+            "\"usd_amount\":50,\"reason\":\"one sentence\"}"
+        )
+        try:
+            import re as _re, json as _json
+            resp = _ollama_inner.chat(
+                model=primary_model,
+                messages=[{"role": "user", "content": prompt}],
+                options={"temperature": 0.1},
+            )
+            text = _re.sub(r'<think>.*?</think>', '', resp["message"]["content"], flags=_re.DOTALL)
+            data = _json.loads(text[text.find('{'):text.rfind('}')+1])
+            return {
+                'symbol':     symbol,
+                'consensus':  data.get('action', 'HOLD'),
+                'confidence': data.get('confidence', 0),
+                'usd_amount': data.get('usd_amount', 50),
+                'reason':     data.get('reason', ''),
+                'price':      price,
+            }
+        except Exception as e:
+            return {'symbol': symbol, 'consensus': 'HOLD', 'reason': str(e)}
+
+    def get_crypto_portfolio():
+        from buffet_bot.crypto import get_coinbase_balance
+        return get_coinbase_balance() or {'total_usd': 0, 'accounts': []}
+
+    def buy_crypto(symbol, usd_amount):
+        if not execute:
+            return {'executed': False, 'reason': 'dry-run — pass --execute'}
+        usd_amount = float(usd_amount)
+        if spent[0] + usd_amount > budget:
+            return {'executed': False, 'reason': f'exceeds budget (${spent[0]:.2f} of ${budget:.2f} spent)'}
+        from buffet_bot.crypto import coinbase_market_buy
+        try:
+            result = coinbase_market_buy(symbol, usd_amount)
+            spent[0] += usd_amount
+            return {'executed': True, 'symbol': symbol, 'usd_amount': usd_amount,
+                    'total_spent': round(spent[0], 2), 'order': str(result)[:120]}
+        except Exception as e:
+            return {'executed': False, 'error': str(e)}
+
+    return {
+        'scan_cryptos': {
+            'description': 'Scan all crypto assets ranked by absolute 30-day price movement',
+            'params':      'top=5',
+            'fn':          scan_cryptos,
+        },
+        'analyze_crypto_asset': {
+            'description': 'LLM analysis of a crypto asset — returns BUY/SELL/HOLD with confidence',
+            'params':      'symbol',
+            'fn':          analyze_crypto_asset,
+        },
+        'get_crypto_portfolio': {
+            'description': 'Get current Coinbase balances',
+            'params':      '',
+            'fn':          get_crypto_portfolio,
+        },
+        'buy_crypto': {
+            'description': 'Market buy a crypto asset with a USD amount via Coinbase',
+            'params':      'symbol, usd_amount',
+            'fn':          buy_crypto,
+        },
+    }
+
+
+@click.command('automate-crypto')
+@click.argument('goal', required=False, default=None)
+@click.option('--execute', is_flag=True, default=False,
+              help='Allow live crypto trades. Default is dry-run.')
+@click.option('--budget', default=200.0, show_default=True, type=float,
+              help='Max USD to spend this session.')
+@click.option('--max-steps', default=8, show_default=True, type=int)
+@click.option('--model', 'primary_model', default=MODELS[0],
+              type=click.Choice(MODELS))
+def automate_crypto(goal, execute, budget, max_steps, primary_model):
+    """AI agent that autonomously scans and trades crypto assets.
+
+    \b
+    Examples:
+      buffet-bot automate-crypto
+      buffet-bot automate-crypto "find the best crypto to buy right now" --execute --budget 200
+    """
+    if not ensure_ollama_running():
+        return
+    if not goal:
+        goal = f"Scan all crypto assets for the best momentum play and invest up to ${budget:.2f}."
+
+    from buffet_bot.automate import CRYPTO_AGENT_PROMPT
+    tools = _build_crypto_tools(execute=execute, budget=budget, primary_model=primary_model)
+
+    console.print(Panel(
+        f"[bold]Goal:[/bold] {goal}\n"
+        f"[bold]Budget:[/bold] ${budget:,.2f}  "
+        f"[bold]Mode:[/bold] {'[green]EXECUTE[/green]' if execute else '[yellow]DRY RUN[/yellow]'}  "
+        f"[bold]Max steps:[/bold] {max_steps}  "
+        f"[bold]Model:[/bold] {primary_model}",
+        title="[bold cyan]Buffet-Bot Automate Crypto[/bold cyan]",
+        border_style="cyan",
+    ))
+
+    run_agent_loop(
+        goal, tools,
+        model=primary_model, budget=budget, max_steps=max_steps,
+        execute=execute, console=console, ollama_module=_ollama,
+        risk='high', strategy='crypto',
+        system_prompt_template=CRYPTO_AGENT_PROMPT,
+    )
+
+
+# ── automate-options ───────────────────────────────────────────────────────────
+
+def _build_options_tools(execute: bool, budget: float, primary_model: str, ticker_list: list) -> dict:
+    """Return the tool registry for the automate-options agent loop."""
+    spent = [0.0]
+
+    def analyze_stock_direction(ticker):
+        ticker = ticker.upper()
+        from buffet_bot.analysis import _run_analysis
+        data     = _run_analysis(ticker, 'high', primary_model, 'growth')
+        realtime = data.get('realtime') or {}
+        best     = data.get('best_buy_resp') or {}
+        return {
+            'ticker':     ticker,
+            'direction':  data.get('consensus', 'HOLD'),
+            'confidence': best.get('confidence', 0),
+            'reason':     best.get('reason', ''),
+            'spot_price': realtime.get('price', 0),
+        }
+
+    def get_options_chain(ticker, side='call', expiry=None):
+        import yfinance as _yf
+        import datetime
+        ticker = ticker.upper()
+        t = _yf.Ticker(ticker)
+        expirations = t.options
+        if not expirations:
+            return {'error': f'No options data for {ticker}'}
+        selected = expiry or expirations[0]
+        if not expiry:
+            target = datetime.date.today() + datetime.timedelta(days=35)
+            for exp in expirations:
+                if datetime.date.fromisoformat(exp) >= target:
+                    selected = exp
+                    break
+        chain = t.option_chain(selected)
+        df = chain.calls if side == 'call' else chain.puts
+        from buffet_bot.data import get_realtime_data
+        spot = (get_realtime_data(ticker) or {}).get('price', 0)
+        if spot:
+            atm_idx = (df['strike'] - spot).abs().nsmallest(5).index
+            df = df.loc[atm_idx]
+        else:
+            df = df.nlargest(5, 'volume')
+        rows = []
+        for _, row in df.iterrows():
+            rows.append({
+                'contractSymbol': row['contractSymbol'],
+                'strike':         row['strike'],
+                'bid':            round(float(row.get('bid', 0) or 0), 2),
+                'ask':            round(float(row.get('ask', 0) or 0), 2),
+                'volume':         int(row.get('volume', 0) or 0),
+                'iv':             round(float(row.get('impliedVolatility', 0) or 0), 3),
+                'expiry':         selected,
+                'inTheMoney':     bool(row.get('inTheMoney', False)),
+            })
+        return {'side': side, 'ticker': ticker, 'expiry': selected, 'contracts': rows}
+
+    def buy_option_contract(contract_symbol, qty=1):
+        if not execute:
+            return {'executed': False, 'reason': 'dry-run — pass --execute'}
+        qty = int(qty)
+        if spent[0] > budget:
+            return {'executed': False, 'reason': 'exceeds budget'}
+        try:
+            from alpaca.trading.requests import MarketOrderRequest
+            from alpaca.trading.enums import OrderSide, TimeInForce
+            order = trading_client.submit_order(MarketOrderRequest(
+                symbol=contract_symbol,
+                qty=qty,
+                side=OrderSide.BUY,
+                time_in_force=TimeInForce.DAY,
+            ))
+            return {
+                'executed':        True,
+                'contract_symbol': contract_symbol,
+                'qty':             qty,
+                'order_id':        str(order.id),
+            }
+        except Exception as e:
+            return {'executed': False, 'error': str(e)}
+
+    def list_tickers():
+        return ticker_list
+
+    return {
+        'list_tickers': {
+            'description': 'List the tickers available for options analysis',
+            'params':      '',
+            'fn':          list_tickers,
+        },
+        'analyze_stock_direction': {
+            'description': 'LLM analysis of stock direction — returns BUY/SELL/HOLD + spot price',
+            'params':      'ticker',
+            'fn':          analyze_stock_direction,
+        },
+        'get_options_chain': {
+            'description': 'Fetch ATM/near-OTM options contracts for a ticker (call or put)',
+            'params':      'ticker, side="call", expiry=None',
+            'fn':          get_options_chain,
+        },
+        'buy_option_contract': {
+            'description': 'Place a paper options BUY order via Alpaca (requires options enabled)',
+            'params':      'contract_symbol, qty=1',
+            'fn':          buy_option_contract,
+        },
+    }
+
+
+@click.command('automate-options')
+@click.argument('goal', required=False, default=None)
+@click.option('--execute', is_flag=True, default=False,
+              help='Allow paper options orders via Alpaca.')
+@click.option('--budget', default=500.0, show_default=True, type=float)
+@click.option('--max-steps', default=10, show_default=True, type=int)
+@click.option('--model', 'primary_model', default=MODELS[0],
+              type=click.Choice(MODELS))
+@click.option('--tickers', default='AAPL,MSFT,NVDA,TSLA,AMZN', show_default=True,
+              help='Comma-separated tickers to screen for options plays.')
+def automate_options(goal, execute, budget, max_steps, primary_model, tickers):
+    """AI agent that identifies and paper-trades options contracts.
+
+    \b
+    Examples:
+      buffet-bot automate-options
+      buffet-bot automate-options "find the best call option this week" --execute
+      buffet-bot automate-options --tickers NVDA,AMD,INTC --execute --budget 1000
+    """
+    if not ensure_ollama_running():
+        return
+    ticker_list = [t.strip().upper() for t in tickers.split(',') if t.strip()]
+    if not goal:
+        goal = (
+            f"Analyze {', '.join(ticker_list)} for directional options plays. "
+            f"Buy the highest-conviction call or put contract within ${budget:.2f}."
+        )
+
+    from buffet_bot.automate import OPTIONS_AGENT_PROMPT
+    tools = _build_options_tools(
+        execute=execute, budget=budget, primary_model=primary_model,
+        ticker_list=ticker_list,
+    )
+
+    console.print(Panel(
+        f"[bold]Goal:[/bold] {goal}\n"
+        f"[bold]Budget:[/bold] ${budget:,.2f}  "
+        f"[bold]Tickers:[/bold] {', '.join(ticker_list)}  "
+        f"[bold]Mode:[/bold] {'[green]EXECUTE[/green]' if execute else '[yellow]DRY RUN[/yellow]'}  "
+        f"[bold]Max steps:[/bold] {max_steps}  "
+        f"[bold]Model:[/bold] {primary_model}",
+        title="[bold cyan]Buffet-Bot Automate Options[/bold cyan]",
+        border_style="cyan",
+    ))
+
+    run_agent_loop(
+        goal, tools,
+        model=primary_model, budget=budget, max_steps=max_steps,
+        execute=execute, console=console, ollama_module=_ollama,
+        risk='high', strategy='speculative',
+        system_prompt_template=OPTIONS_AGENT_PROMPT,
+    )

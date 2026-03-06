@@ -12,10 +12,11 @@ from rich.prompt import Prompt
 from rich import box
 
 from buffet_bot.globals import (
-    PLANS_DIR, GOAL_PRESETS, console,
+    PLANS_DIR, GOAL_PRESETS, console, LIVE_MODE,
 )
 from buffet_bot.display import _score_color, _consensus_text, _print_live_market
 from buffet_bot.analysis import _run_analysis, _place_order
+from buffet_bot.live_guard import confirm_live_execution
 
 # ── Path safety ───────────────────────────────────────────────────────────────
 
@@ -189,8 +190,15 @@ def _execute_plan_buys(buy_candidates):
     if choice == 'skip':
         return
 
+    mode_label = "LIVE" if LIVE_MODE else "Paper"
     for ticker, result, qty in buy_candidates:
-        if choice == 'pick' and not click.confirm(f"  Execute BUY {qty}x {ticker}? (Paper)"):
+        if choice == 'pick' and not click.confirm(f"  Execute BUY {qty}x {ticker}? ({mode_label})"):
+            continue
+        price = (result.get('realtime') or {}).get('price', 0) or 0
+        if not confirm_live_execution(
+            f"BUY {qty}x {ticker}", ticker, qty, "BUY",
+            estimated_cost=qty * price,
+        ):
             continue
         best = dict(result['best_buy_resp']) if result['best_buy_resp'] else {}
         best['qty'] = qty
@@ -236,8 +244,15 @@ def _guide_single_stock(primary_model):
     console.print(f"\nConsensus: {_consensus_text(result['consensus'])}")
 
     if result['consensus'] == 'BUY' and result['best_buy_resp']:
-        if click.confirm(f"\nExecute BUY {ticker}? (Paper)"):
-            _place_order(ticker, result['best_buy_resp'])
+        mode_label = "LIVE" if LIVE_MODE else "Paper"
+        if click.confirm(f"\nExecute BUY {ticker}? ({mode_label})"):
+            qty = result['best_buy_resp'].get('qty', 1)
+            price = (result.get('realtime') or {}).get('price', 0) or 0
+            if confirm_live_execution(
+                f"BUY {qty}x {ticker}", ticker, qty, "BUY",
+                estimated_cost=qty * price,
+            ):
+                _place_order(ticker, result['best_buy_resp'])
     else:
         console.print(f"[yellow]Consensus is {result['consensus']} — no trade recommended.[/yellow]")
 

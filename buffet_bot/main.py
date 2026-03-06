@@ -14,7 +14,7 @@ from buffet_bot.globals import DB_PATH  # re-exported for tests that patch buffe
 from buffet_bot.cmd_trading import (
     ask, lookup, browse, analyze, buy,
     history, portfolio, chat, scan, status,
-    stream, chart, dashboard,
+    stream, chart, dashboard, compare, explain,
 )
 
 # ── Intel commands ────────────────────────────────────────────────────────────
@@ -25,12 +25,12 @@ from buffet_bot.cmd_intel import (
 # ── Portfolio commands ────────────────────────────────────────────────────────
 from buffet_bot.cmd_portfolio import (
     rebalance, backtest, correlate, check_sells, var,
-    forecast, whatif, scenarios, milestones,
+    forecast, whatif, scenarios, milestones, sectors,
 )
 
 # ── Account commands ──────────────────────────────────────────────────────────
 from buffet_bot.cmd_account import (
-    guide, plans, automate,
+    guide, plans, automate, automate_crypto, automate_options,
     config, alerts, watchlist, beats, completion,
 )
 
@@ -56,6 +56,8 @@ cli.add_command(status)
 cli.add_command(stream)
 cli.add_command(chart)
 cli.add_command(dashboard)
+cli.add_command(compare)
+cli.add_command(explain)
 
 # Register intel commands
 cli.add_command(news)
@@ -74,11 +76,14 @@ cli.add_command(forecast)
 cli.add_command(whatif)
 cli.add_command(scenarios)
 cli.add_command(milestones)
+cli.add_command(sectors)
 
 # Register account commands
 cli.add_command(guide)
 cli.add_command(plans)
 cli.add_command(automate)
+cli.add_command(automate_crypto)
+cli.add_command(automate_options)
 cli.add_command(config)
 cli.add_command(alerts)
 cli.add_command(watchlist)

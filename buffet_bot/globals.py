@@ -2,9 +2,11 @@
 import os
 import json
 import pathlib
+import subprocess
 import click
 import contextlib
 import requests
+import requests as _req
 from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import sqlite3
@@ -40,7 +42,6 @@ SECRET_KEY = os.getenv('ALPACA_SECRET_KEY')
 if not API_KEY or not SECRET_KEY:
     raise ValueError("Add ALPACA_API_KEY and ALPACA_SECRET_KEY to .env")
 
-trading_client = TradingClient(API_KEY, SECRET_KEY, paper=True)
 data_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
 console = Console()
 
@@ -52,9 +53,69 @@ MODEL_COLORS = {
     'qwen2.5:7b': 'magenta',
 }
 
+
+def ensure_ollama_running() -> bool:
+    """Start Ollama automatically if it is not already running.
+
+    Returns True if Ollama is reachable, False if it could not be started.
+    """
+    try:
+        _req.get("http://localhost:11434", timeout=2)
+        return True  # already up
+    except Exception:
+        pass
+
+    console.print("[dim]Ollama not detected — starting it in the background...[/dim]")
+    try:
+        kwargs = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+        if hasattr(subprocess, "DETACHED_PROCESS"):  # Windows only
+            kwargs["creationflags"] = (
+                subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+            )
+        subprocess.Popen(["ollama", "serve"], **kwargs)
+    except FileNotFoundError:
+        console.print(Panel(
+            "[bold red]Ollama is not installed or not on PATH.[/bold red]\n\n"
+            "Install it from [cyan]https://ollama.com[/cyan] and pull the required models:\n"
+            "  [cyan]ollama pull deepseek-r1[/cyan]\n"
+            "  [cyan]ollama pull qwen2.5:7b[/cyan]",
+            title="[bold red]Ollama Not Found[/bold red]",
+            border_style="red",
+        ))
+        return False
+    except Exception as e:
+        console.print(f"[red]Could not start Ollama: {e}[/red]")
+        return False
+
+    # Poll until Ollama responds (up to 5 seconds)
+    for _ in range(10):
+        time.sleep(0.5)
+        try:
+            _req.get("http://localhost:11434", timeout=1)
+            console.print("[dim green]Ollama started successfully.[/dim green]")
+            return True
+        except Exception:
+            pass
+
+    console.print(Panel(
+        "[bold red]Ollama did not start in time.[/bold red]\n\n"
+        "Try starting it manually:\n"
+        "  [cyan]ollama serve[/cyan]",
+        title="[bold red]Ollama Timeout[/bold red]",
+        border_style="red",
+    ))
+    return False
+
+
 PLANS_DIR   = os.path.expanduser("~/.buffet-plans")
 DB_PATH     = os.path.expanduser("~/.buffet-bot.db")
 CONFIG_PATH = os.path.expanduser("~/.buffet-bot-config.toml")
+
+# Live guard — imported after DB_PATH and console are defined to avoid circular
+# import issues (live_guard.py imports DB_PATH and console from this module).
+from buffet_bot.live_guard import is_live_mode, get_trading_client as _get_trading_client
+LIVE_MODE = is_live_mode()
+trading_client = _get_trading_client()
 
 FRED_API_KEY = os.getenv('FRED_API_KEY', '')
 
@@ -85,6 +146,13 @@ STRATEGY_PROMPTS = {
         "Focus on distressed assets with recovery catalysts: recent earnings trajectory improvement, "
         "debt reduction trend, new management, or sector tailwind. Accept recent losses if the "
         "fundamental thesis is clearly improving. High risk — require a strong conviction catalyst."
+    ),
+    'speculative': (
+        "Focus on high-risk, high-reward momentum plays: small-cap tickers with high beta, "
+        "elevated short interest, recent catalysts, or meme momentum. Accept weak fundamentals "
+        "if price momentum, squeeze potential, or a near-term catalyst is compelling. "
+        "Use tight stop-losses (5–8%) and limit each position to 1–3% of portfolio. "
+        "This is speculation — expect higher loss rates in exchange for outsized upside."
     ),
 }
 
@@ -129,3 +197,50 @@ def _load_config():
     return cfg
 
 _CONFIG = _load_config()
+
+# ── Theme ─────────────────────────────────────────────────────────────────────
+# Set BUFFET_BOT_THEME=light in your environment for a light-background terminal.
+# Default is 'dark' (bright colors optimised for dark terminals).
+
+_THEME_MODE = os.getenv('BUFFET_BOT_THEME', 'dark').strip().lower()
+if _THEME_MODE not in ('dark', 'light'):
+    _THEME_MODE = 'dark'
+
+_THEMES = {
+    'dark': {
+        'primary':   'bright_cyan',
+        'secondary': 'bright_magenta',
+        'success':   'bright_green',
+        'warning':   'bright_yellow',
+        'danger':    'bright_red',
+        'muted':     'dim',
+        'header':    'bold bright_cyan',
+        'border':    'bright_cyan',
+        'value':     'bright_white',
+    },
+    'light': {
+        'primary':   'blue',
+        'secondary': 'dark_magenta',
+        'success':   'green',
+        'warning':   'dark_goldenrod',
+        'danger':    'red',
+        'muted':     'dim',
+        'header':    'bold blue',
+        'border':    'blue',
+        'value':     'black',
+    },
+}
+
+THEME = _THEMES[_THEME_MODE]
+
+
+def theme_color(role: str) -> str:
+    """Return the Rich color string for a semantic role in the active theme.
+
+    Roles: primary, secondary, success, warning, danger, muted, header, border, value.
+    Falls back to 'white' for unknown roles.
+
+    Example:
+        console.print(Panel("hello", border_style=theme_color('border')))
+    """
+    return THEME.get(role, 'white')

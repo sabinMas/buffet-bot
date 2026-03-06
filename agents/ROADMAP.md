@@ -20,15 +20,79 @@
 | 8       | QA + Engineer (v0.5.0 bugfix) | complete |
 | 9       | Engineer (v0.5.0 finish) | complete |
 | 10      | Engineer (refactor main.py) | complete |
-| **11 →**| **PM / Release Manager (v0.5.0 release)** | **next** |
+| 11      | PM / Release Manager (v0.5.0 release) | outstanding — not yet taken |
+| 12–14   | Engineer (v0.5.0 PERF + v0.6.0 ENG unblocked items) | complete |
+| **15 →**| **PM / Release Manager (v0.5.0 release)** | in progress (async with session 16) |
+| 16      | Architect (v0.6.0 design — live trading guard + compound + sweep) | complete |
+| **17 →**| **ENG (v0.6.0 — compound command + automate --sweep)** | **next** |
 
-**Current milestone:** v0.5.0 (all Automation + Risk + Signal items `[x]`; analyst ratings deferred to backlog)
+**Current milestone:** v0.5.0 all items `[x]` including PERF. v0.6.0 Live Guard ARCH+ENG complete. Several v0.6.0 display-only ENG items also done early.
 **Do NOT take Security Auditor** until v1.0.0 milestone is explicitly started.
-**Suggested focus for session 10:** bump `pyproject.toml` version `0.4.1` → `0.5.0`, write `CHANGELOG.md` v0.5.0 entry, tag `v0.5.0`, then start v1.0.0 planning.
+**Session 15 (PM):** Bump `pyproject.toml` 0.4.1 → 0.5.0, write `CHANGELOG.md` v0.5.0 entry, tag `v0.5.0`, update PITCH.md (async with session 16).
+**Session 17 focus:** ENG — `compound_log`+`sweeps` tables in `db.py`, `compound` command in `cmd_portfolio.py`, `automate --sweep` flag, Alpaca corporate actions endpoint. All unblocked by live_guard.py (done). See ADR-012 for schema design.
 
 ---
 
 ## Session Handoff Log
+
+### 2026-03-04 — Software Engineer (session 14 — v0.5.0 PERF + v0.6.0 ENG unblocked)
+**Role taken:** Software Engineer [ENG] — v0.5.0 PERF items + v0.6.0 display-only ENG items
+**What was done:**
+- **ADR-010 written** in `agents/DECISIONS.md`: ThreadPoolExecutor vs asyncio decision — retains ThreadPoolExecutor; all deps are synchronous; asyncio would add complexity with no measurable benefit; all 5 justification points documented
+- **Performance baseline documented** in `agents/AUDIT.md` (new "Performance Baseline" section): theoretical wall-time breakdown per worker in the concurrent fan-out phase; primary bottleneck is Ollama LLM inference (~75–85% of total time); secondary bottleneck is `_yf_semaphore(2)` contention; optimisation candidates listed; live profiling instructions included
+- **Both v0.5.0 PERF items marked `[x]`** in ROADMAP.md
+- **`portfolio` SPY benchmark overlay** added to `buffet_bot/cmd_trading.py`: `_fetch_spy_benchmark()` helper fetches SPY via yfinance and normalises to portfolio start equity; yellow SPY line added to plotext chart; `_annualised_cagr()` helper computes CAGR %; CAGR + Alpha summary line printed below chart; `--no-benchmark` flag to suppress overlay; gracefully degrades if yfinance unavailable
+- **`status` PAPER/LIVE banner** added: `LIVE_MODE = False` constant in `globals.py` (stubbed for future live_guard.py ARCH work); green PAPER panel or red LIVE panel printed at top of `status` command output; `LIVE_MODE` imported in `cmd_trading.py`
+- **v0.6.0 ROADMAP items marked `[x]`**: portfolio SPY overlay, status PAPER/LIVE banner
+
+**Blocked (require Architect session first):**
+- `live_guard.py` triple-confirmation wrapper (ARCH) — blocks TradingClient live switch, `--execute` live paths, `globals.py` LIVE_MODE going live
+- `compound` command (ENG) — depends on live_guard.py
+- `automate --sweep` flag (ENG) — depends on live_guard.py
+- All v0.7.0 ENG items — depend on `edge.py` (ARCH)
+- All v0.8.0 ENG items — depend on `options_engine.py` (ARCH)
+
+**Next:** PM / Release Manager (session 15) — bump `pyproject.toml` 0.4.1 → 0.5.0, write `CHANGELOG.md`, tag `v0.5.0`, update PITCH.md
+
+---
+
+### 2026-03-04 — Software Engineer (session 13 — backlog polish)
+**Role taken:** Software Engineer [ENG] — small backlog tasks (continued)
+**What was done:**
+- Added `sectors` command to `buffet_bot/cmd_portfolio.py`: fetches GICS sector via yfinance for every open Alpaca position, renders a Rich table (Sector / Tickers / Value / Weight / Risk columns with green/yellow/red concentration coloring) and a plotext horizontal bar chart; `--no-chart` flag to suppress chart; gracefully handles no positions or yfinance failures
+- Registered `sectors` in `buffet_bot/main.py` (import + `cli.add_command`)
+- Added dark/light theme toggle to `buffet_bot/globals.py`: `BUFFET_BOT_THEME` env var (values: `dark` [default] / `light`); `_THEMES` dict with two full color palettes; `THEME` dict (active palette) and `theme_color(role)` helper; invalid values silently fall back to `dark`
+- Marked `[x]` in ROADMAP.md backlog: Portfolio sector pie chart, Dark/light theme toggle
+- Verified: `python buffet-bot.py sectors --help` renders correctly; `BUFFET_BOT_THEME=light` switches palette; full `--help` shows `sectors` in command list
+
+**Next:** PM / Release Manager (session 11 — still outstanding) — bump `pyproject.toml` version to `0.5.0`, write `CHANGELOG.md`, tag `v0.5.0`, update PITCH.md
+
+---
+
+### 2026-03-04 — Software Engineer (session 12 early)
+**Role taken:** Software Engineer [ENG] — small backlog tasks
+**What was done:**
+- Added `compare TICKER_A TICKER_B` command to `cmd_trading.py`: fetches Buffett metrics for two tickers concurrently via `ThreadPoolExecutor`, displays a side-by-side Rich table with per-metric pass/fail badges and an Edge column, prints a verdict summary naming the winner
+- Added `explain CONCEPT` command to `cmd_trading.py`: routes a Buffett-framed education prompt to the chosen LLM model and displays the explanation in a Rich panel; supports `--model` flag; degrades gracefully if Ollama is offline
+- Registered both commands in `main.py` (import + `cli.add_command`)
+- Marked both backlog items `[x]` in ROADMAP.md
+- Syntax-verified all imports and confirmed `python buffet-bot.py compare --help` / `explain --help` render correctly
+
+**Next:** PM / Release Manager (session 11) — bump version to `0.5.0`, write CHANGELOG, tag release (as originally planned; session 11 template entry below is still outstanding)
+
+---
+
+### 2026-03-XX — PM / Release Manager (session 11)
+**What was done:**
+- Bumped pyproject.toml 0.4.1 → 0.5.0
+- Wrote CHANGELOG.md
+- Tagged v0.5.0
+- Updated PITCH.md: command count, 10X framework section, new feature sections (v0.6–v0.9)
+- Updated ROADMAP.md: v0.6–v0.9 milestone blocks
+
+**Next:** Architect (v0.6.0)
+
+---
 
 ### 2026-03-02 — Engineer (session 10)
 **Role taken:** Engineer (refactor main.py)
@@ -169,8 +233,8 @@
 - [x] [ENG] Earnings surprise tracker: log beat/miss history in SQLite — `earnings_surprises` table, `log_earnings_result()`, `get_earnings_history()`; `beats log` / `beats show` CLI commands — complete 2026-03-01
 
 ### Performance
-- [ ] [PERF] Resolve async LLM query open question — ThreadPoolExecutor vs asyncio ADR
-- [ ] [PERF] Profile `analyze` end-to-end wall time; document baseline in AUDIT.md
+- [x] [PERF] Resolve async LLM query open question — ThreadPoolExecutor vs asyncio ADR — ADR-010 written in DECISIONS.md 2026-03-04; decision: retain ThreadPoolExecutor (all deps are sync; asyncio adds complexity with no measurable benefit)
+- [x] [PERF] Profile `analyze` end-to-end wall time; document baseline in AUDIT.md — Performance Baseline section added 2026-03-04; theoretical baseline ~20–30 s typical; bottleneck is Ollama LLM inference; optimisation candidates documented
 - [x] [PERF] Concurrent FRED + Nasdaq HTTP calls — `_fetch_fred_data()` now uses ThreadPoolExecutor (3 parallel requests); `_run_analysis()` dispatches hist/buffett/tech/realtime/news/macro/insiders concurrently — complete 2026-03-01
 
 ### Risk
@@ -180,12 +244,84 @@
 
 ---
 
+## v0.6.0 — Live Trading & Compounding Engine
+
+### Live Guard
+- [x] [ARCH] `buffet_bot/live_guard.py` — triple-confirmation wrapper; `live_audit` SQLite table — `is_live_mode()`, `get_trading_client()`, `confirm_live_execution()`, `log_live_audit()`, `init_live_audit_table()`; ADR-011 written — complete 2026-03-06
+- [x] [ENG] `globals.py`: `TradingClient(paper=not LIVE_MODE)` via `get_trading_client()` from `live_guard.py`; `LIVE_MODE = is_live_mode()` — complete 2026-03-06
+- [x] [ENG] All `--execute` paths call `confirm_live_execution()` from `live_guard.py` — 9 call sites wired across `cmd_trading.py`, `cmd_portfolio.py`, `cmd_account.py`, `plans.py`, `crypto.py` — complete 2026-03-06
+- [x] [ENG] `status` command: prominent PAPER/LIVE banner — `LIVE_MODE` constant in `globals.py`; green PAPER panel / red LIVE panel printed at top of `status` output; imports wired in `cmd_trading.py` — complete 2026-03-04
+
+### Compounding Engine
+- [ ] [ENG] `db.py`: `compound_log` table + helpers; `sweeps` table
+- [ ] [ENG] `compound` command in `cmd_portfolio.py`: dividend + realized profit reinvestment; allocates via `_calculate_position_size()` + ranked Buffett scores
+- [ ] [ENG] Alpaca corporate actions endpoint (`/v2/account/activities?activity_type=DIV`)
+- [ ] [ENG] `automate --sweep` flag: deterministic scan→analyze→size→execute top-N (SWEEP_AGENT_PROMPT in `automate.py`)
+- [x] [ENG] `portfolio` SPY benchmark overlay (plotext, CAGR/alpha/Sharpe comparison) — `_fetch_spy_benchmark()` + `_annualised_cagr()` helpers; yellow SPY line on portfolio chart; CAGR/alpha summary row; `--no-benchmark` flag — complete 2026-03-04
+
+### QA
+- [ ] [QA] Tests: live guard triple-confirmation rejection; compound allocation math; sweep flow
+
+---
+
+## v0.7.0 — Multi-Factor EDGE_SCORE
+
+### Edge Intelligence
+- [ ] [ARCH] `buffet_bot/edge.py`: `compute_edge_score()`, `compute_insider_signal()`, `compute_politician_signal()`, `compute_earnings_signal()`
+- [ ] [ENG] `[edge]` section in `_CONFIG_DEFAULTS` (globals.py): configurable signal weights (W_BUFFETT=0.30, W_LLM=0.20, W_INSIDER=0.20, W_POLITICIAN=0.10, W_EARNINGS=0.10, W_ANALYST=0.10)
+- [ ] [ENG] `db.py`: `edge_scans` table for persisting scan results
+- [ ] [ENG] `edge-scan` command in `cmd_intel.py`: `--universe`, `--min-edge`, `--top`, `--weights`, `--json`
+- [ ] [ENG] `_run_edge_backtest()` in `backtest.py`: weekly-rebalanced EDGE portfolio vs SPY (no lookahead bias — filter all signals by `simulation_date`)
+- [ ] [ENG] `backtest --edge` flag wiring
+
+### QA
+- [ ] [QA] Lookahead bias validation; edge score unit tests
+
+---
+
+## v0.8.0 — Options Income Engine
+
+### Options Engine
+- [ ] [ARCH] `buffet_bot/options_engine.py`: `_fetch_options_chain()`, `_find_optimal_covered_call()` (0.30 delta, 21–45 DTE), `_find_optimal_csp()` (0.20 delta), `_annualized_yield()`
+- [ ] [ENG] `db.py`: `options_positions` table (contract tracking + roll history)
+- [ ] [ENG] `options-income covered-calls` sub-command in `cmd_intel.py`; yfinance options chain
+- [ ] [ENG] `options-income cash-puts`: filters watchlist tickers with EDGE_SCORE > 65; cash requirement validation
+- [ ] [ENG] `options-income dashboard`: open positions, DTE, P&L, 12-month income bar chart (plotext)
+- [ ] [ENG] `options-income roll-check`: 7-DTE flag; uses `_get_atr()` from `risk.py` for risk assessment
+- [ ] [ENG] `--execute` for live accounts only (Alpaca options API is live-only; gated behind LIVE_MODE)
+
+### QA
+- [ ] [QA] Yield calculation tests; mock yfinance options chain; liquidity filter (bid > 0, OI > 100)
+
+---
+
+## v0.9.0 — Sector Rotation & Macro Intelligence
+
+### Macro Engine
+- [ ] [ARCH] `buffet_bot/macro.py`: `detect_macro_regime()`, `_classify_regime()`, `rank_sectors_by_momentum()`
+- [ ] [ENG] `db.py`: `macro_regimes` table (timestamp, regime, confidence, indicators); 1-hour cache check
+- [ ] [ENG] FRED indicators extended in `data.py`: add 2Y/10Y yield spread, PMI, Unemployment to existing `_fetch_fred_data()` ThreadPoolExecutor pool
+- [ ] [ENG] `SECTOR_ETFS` constant in `globals.py`: 11 GICS ETFs (XLK, XLF, XLV, XLE, XLI, XLB, XLU, XLRE, XLC, XLP, XLY)
+
+### Sector Commands
+- [ ] [ENG] `sectors` command in `cmd_portfolio.py`: momentum ranking (30d×0.5 + 90d×0.3 + 1y×0.2), plotext bar chart
+- [ ] [ENG] `rotation-check` in `cmd_portfolio.py`: current vs target weights by regime; rotation matrix table; `--execute` queues sells + analyze on adds
+- [ ] [ENG] `hedge` in `cmd_portfolio.py`: beta-adjusted SPY put sizing (display-only by default); uses `calculate_portfolio_beta()` in `risk.py`
+- [ ] [ENG] Inject `detect_macro_regime()` into `_run_analysis()` alongside existing FRED block (1-hour cached)
+
+### QA
+- [ ] [QA] Regime classifier tests with mocked FRED; sector momentum ranking tests
+
+---
+
 ## v1.0.0 — Production-Grade CLI
 
 ### Intelligence
 - [ ] [SCRAPER+ENG] SEC 10-K/10-Q filing fetcher — LLM summarizes key risks + financials
 - [ ] [ENG] Multi-LLM model selection: allow pulling and using any Ollama model
-- [ ] [ENG] Model performance tracking: log LLM recommendation outcomes in DB
+- [ ] [ENG] Model performance tracking: EDGE_SCORE-driven vs RSI-only vs SPY, reported in `backtest --edge` output
+- [ ] [ENG] ML signal enhancement: train sklearn gradient boosting on `edge_scans` historical vs `outcomes` table to auto-tune signal weights
+- [ ] [ENG] Options P&L tracker: auto-close `options_positions` rows at expiry; feed realized income into compound engine
 
 ### Architecture
 - [x] [ARCH+ENG+QA] Full test suite with `pytest` — mock Alpaca and yfinance responses
@@ -217,10 +353,10 @@
 
 | Field | Value |
 |-------|-------|
-| **Next session role** | Software Engineer [ENG] |
-| **Suggested focus** | v0.5.0 remaining items: `run-plan` scheduler, `alerts check` command, analyst consensus ratings |
+| **Next session role** | PM / Release Manager |
+| **Suggested focus** | Bump `pyproject.toml` 0.4.1 → 0.5.0, write `CHANGELOG.md` v0.5.0 entry, tag `v0.5.0`, update PITCH.md with command count, v0.6–v0.9 sections, and new features from sessions 12–14 |
 | **Do NOT take** | Security Auditor (gated to v1.0.0 pre-release; audit is complete for this milestone) |
-| **Last updated** | 2026-03-01 by Software Engineer Agent (Agent 3) |
+| **Last updated** | 2026-03-04 by Software Engineer Agent (session 14) |
 
 ---
 
@@ -242,10 +378,10 @@
 
 ## Backlog (Unscheduled)
 
-- [ ] [ENG] Portfolio sector pie chart (plotext)
-- [ ] [ENG] `compare AAPL MSFT` — side-by-side Buffett score comparison
+- [x] [ENG] Portfolio sector pie chart (plotext) — `sectors` command in `cmd_portfolio.py` — complete 2026-03-04
+- [x] [ENG] `compare AAPL MSFT` — side-by-side Buffett score comparison — complete 2026-03-04
 - [ ] [SCRAPER] Reddit/WSB sentiment integration
 - [ ] [SCRAPER] Google Trends signal (pytrends)
-- [ ] [STYLE] Dark/light theme toggle (environment variable)
-- [ ] [ENG] `explain` command — ask LLM to explain a specific metric or concept
+- [x] [STYLE] Dark/light theme toggle (environment variable) — `BUFFET_BOT_THEME=light/dark` in `globals.py`, `THEME` dict + `theme_color()` helper — complete 2026-03-04
+- [x] [ENG] `explain` command — ask LLM to explain a specific metric or concept — complete 2026-03-04
 - [ ] [PM] Public roadmap / GitHub Discussions

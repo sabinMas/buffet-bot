@@ -58,6 +58,8 @@ def init_db():
     """)
     conn.commit()
     conn.close()
+    from buffet_bot.live_guard import init_live_audit_table
+    init_live_audit_table()
 
 
 def log_recommendation(ticker, action, confidence, qty, entry_price,

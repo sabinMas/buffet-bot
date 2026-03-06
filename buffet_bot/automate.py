@@ -33,6 +33,46 @@ EXECUTE_DIRECTIVE = (
     "When analyze_stock() returns consensus='BUY' and budget remains, call buy_stock() immediately."
 )
 
+CRYPTO_AGENT_PROMPT = """
+You are an autonomous crypto trading agent.
+Goal: {goal}
+Budget: ${budget:.2f} | Mode: {execute_mode}
+Risk appetite: {risk}
+
+Available tools:
+{tool_descriptions}
+
+Each turn respond with ONLY one JSON object:
+  {{"thought": "<brief reasoning>", "tool": "<tool_name>", "args": {{...}}}}
+
+When done, call: {{"thought": "...", "tool": "done", "args": {{"summary": "..."}}}}
+Workflow: scan_cryptos → analyze the top movers → buy_crypto if confident.
+{execute_directive}
+""".strip()
+
+OPTIONS_AGENT_PROMPT = """
+You are an autonomous options trading agent.
+Goal: {goal}
+Budget: ${budget:.2f} | Mode: {execute_mode}
+Risk appetite: {risk}
+
+Available tools:
+{tool_descriptions}
+
+Options rules:
+- Call options → when stock direction is BUY (bullish)
+- Put options → when stock direction is SELL (bearish)
+- Prefer ATM or 1-strike OTM contracts, nearest 30–45 day expiry
+- Each contract controls 100 shares; premium is typically $50–$500
+- Never buy a contract if IV > 80% without strong catalyst reason
+
+Workflow: analyze_stock_direction → get_options_chain (correct side) → buy_option_contract.
+Each turn respond with ONLY one JSON object:
+  {{"thought": "<brief reasoning>", "tool": "<tool_name>", "args": {{...}}}}
+When done: {{"thought": "...", "tool": "done", "args": {{"summary": "..."}}}}
+{execute_directive}
+""".strip()
+
 
 def _extract_json(text: str) -> dict | None:
     """Extract a JSON object from LLM output, handling common noise."""
@@ -84,6 +124,7 @@ def run_agent_loop(
     ollama_module,
     risk: str = 'medium',
     strategy: str = 'value',
+    system_prompt_template: str | None = None,
 ) -> dict:
     """
     Drive the ReAct agent loop until the LLM calls done() or max_steps is hit.
@@ -110,7 +151,8 @@ def run_agent_loop(
 
     execute_mode      = "EXECUTE (paper trades allowed)" if execute else "DRY RUN (no orders placed)"
     execute_directive = EXECUTE_DIRECTIVE if execute else ""
-    system_content = AGENT_SYSTEM_PROMPT.format(
+    prompt_template = system_prompt_template or AGENT_SYSTEM_PROMPT
+    system_content = prompt_template.format(
         goal=goal,
         budget=budget,
         execute_mode=execute_mode,

@@ -24,7 +24,7 @@ Most "AI trading" products are black boxes that give you a signal with no reason
 
 **No subscription. No cloud.** Both AI models (`deepseek-r1` and `qwen2.5:7b`) run on your own hardware via [Ollama](https://ollama.com). Zero ongoing AI cost after setup.
 
-**Paper trading by default.** `paper=True` is hardcoded. Every order goes to Alpaca's free paper trading environment — simulated money only. You can test strategies for months without touching a real dollar.
+**Paper trading by default.** `paper=True` is the default safe mode. Live trading requires `BUFFET_BOT_LIVE=true` env var plus a triple-confirmation prompt per trade — a deliberate two-factor safety gate.
 
 **Warren Buffett's framework, codified.** The scoring system awards points for ROE, ROIC, debt-to-equity, operating margins, free cash flow yield, P/E, P/B, and dividend yield — the same criteria Buffett has written about publicly for 40 years.
 
@@ -87,9 +87,63 @@ Most "AI trading" products are black boxes that give you a signal with no reason
 | Company Lookup | Search ticker by company name via yfinance |
 | Guided Wizard | Step-by-step mode for beginners: analyze → plan → execute |
 
+### Live Trading & Compounding Engine (v0.6)
+| Feature | Detail |
+|---------|--------|
+| `compound` Command | Reinvests dividends + realized profits into top-ranked Buffett-scored positions |
+| `automate --sweep` | Fully autonomous scan → analyze → size → execute pipeline; deterministic and auditable |
+| SPY Benchmark Overlay | `portfolio` gains CAGR / alpha / Sharpe vs buy-and-hold SPY |
+
+### Multi-Factor Edge Intelligence (v0.7)
+| Feature | Detail |
+|---------|--------|
+| EDGE_SCORE Formula | Weighted blend: Buffett (30%) + LLM (20%) + Insider (20%) + Politician (10%) + Earnings (10%) + Analyst (10%) |
+| `edge-scan` Command | Ranks universe by EDGE_SCORE; `--min-edge`, `--top`, `--weights`, `--json` flags |
+| Historical Edge Backtest | `backtest --edge`: weekly-rebalanced EDGE portfolio vs SPY; strict no-lookahead bias |
+
+### Options Income Engine (v0.8)
+| Feature | Detail |
+|---------|--------|
+| Covered Calls | Finds optimal 0.30-delta, 21–45 DTE contracts on existing positions |
+| Cash-Secured Puts | Targets tickers with EDGE_SCORE > 65; validates cash requirement |
+| Income Dashboard | Open positions, DTE countdown, P&L, 12-month income bar chart (plotext) |
+| Roll Check | 7-DTE flag; ATR-based risk assessment for rolling vs closing |
+
+### Macro & Sector Intelligence (v0.9)
+| Feature | Detail |
+|---------|--------|
+| FRED Regime Detector | Classifies macro regime from yield spread, PMI, unemployment; 1-hour cache |
+| `sectors` Command | 11 GICS ETF momentum ranking (30d/90d/1y weighted); plotext bar chart |
+| `rotation-check` | Current vs target allocation by regime; rotation matrix; `--execute` queues trades |
+| `hedge` | Beta-adjusted SPY put sizing for portfolio protection (display-only by default) |
+
 ---
 
-## Command Reference (21 commands)
+## The 10X Compounding Framework
+
+Buffet-Bot's roadmap is designed around four stacked income and growth layers that compound on each other:
+
+| Layer | Mechanism | Target CAGR Contribution |
+|-------|-----------|--------------------------|
+| 1 | Multi-Factor EDGE_SCORE (Buffett + LLM + Insider + Politician + Earnings + Analyst) | +12–18% alpha over SPY |
+| 2 | Options Income (covered calls + cash-secured puts at 1–2%/mo) | +15–20% annualized yield |
+| 3 | Automated Compounding (daily dividend/premium reinvestment, zero cash drag) | +2–3% |
+| 4 | Macro Regime Timing (avoid 20–40% drawdowns via sector rotation) | +5–8% risk-adjusted |
+
+**Illustrative compounding math** — $10,000 start, $500/month contributions:
+
+| Scenario | 3-Year FV | 5-Year FV |
+|----------|-----------|-----------|
+| S&P 500 baseline (10%) | $32,480 | $48,866 |
+| Equity alpha only (25%) | $46,223 | $93,111 |
+| + Options income (40%) | $62,841 | $179,204 |
+| + Full compounding engine (42%) | $66,390 | $194,550 |
+
+*Illustrative only — not financial advice. Past performance does not guarantee future results. All figures assume reinvestment of all income and no taxes or fees.*
+
+---
+
+## Command Reference (35+ commands)
 
 ```
 Core Trading
@@ -124,6 +178,11 @@ AI & Planning
   lookup        Find ticker by company name
   guide         Interactive wizard (beginner-friendly)
   plans         Save, list, run, delete investment plans
+
+Live Trading & Compounding (v0.6):  compound, automate --sweep
+Edge Intelligence (v0.7):          edge-scan
+Options Income (v0.8):             options-income (covered-calls, cash-puts, dashboard, roll-check)
+Macro Intelligence (v0.9):         sectors, rotation-check, hedge
 ```
 
 ---
@@ -164,15 +223,15 @@ AI & Planning
 
 ---
 
-## Potential Extensions
+## Roadmap Preview
 
-The architecture is a single Python file with a clean section structure. Easy areas to extend:
-
-- Swap in any Ollama-compatible model (Llama 3, Mistral, Phi-3, etc.)
-- Add new commands by decorating a function with `@cli.command()`
-- Replace paper trading with live Alpaca trading by removing the `paper=True` flag (use with extreme caution)
-- Add a watchlist scanner with email/Slack alerts
-- Export backtest results to CSV for further analysis in Excel or Jupyter
+| Version | Theme | Key Addition |
+|---------|-------|--------------|
+| v0.6 | Live Trading & Compounding | `compound` + `automate --sweep`; live guard triple-confirmation; SPY benchmark overlay |
+| v0.7 | Multi-Factor Edge Intelligence | `EDGE_SCORE` combining 6 signal sources; `edge-scan`; edge-vs-SPY backtest |
+| v0.8 | Options Income Engine | Covered calls + cash-secured puts screener; income dashboard; roll checker |
+| v0.9 | Sector Rotation & Macro | FRED regime detector; `sectors` momentum ranking; `rotation-check`; `hedge` |
+| v1.0 | Production-Grade CLI | ML signal weight tuning; PyPI package; Docker + Ollama sidecar; full CHANGELOG |
 
 ---
 
