@@ -1,5 +1,6 @@
 """CLI commands: news, insiders, crypto, volatile, options, edge_scan."""
 import os
+import re
 import json as _json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -357,6 +358,41 @@ def options(ticker, expiry, top):
 
 # ── Edge Scan ──────────────────────────────────────────────────────────────────
 
+
+def _query_llm_conviction(ticker: str, model: str) -> float:
+    """Ask a local LLM for a 0-100 Buffett-style conviction score for *ticker*.
+
+    Returns 50.0 (neutral) on any failure so the edge score degrades gracefully.
+    """
+    prompt = (
+        f"You are a Buffett-style value investor. Rate {ticker} as a long-term buy.\n"
+        "Return ONLY valid JSON: {\"conviction\": <integer 0-100>}\n"
+        "Where 0=strong sell, 50=neutral/no opinion, 100=strong buy.\n"
+        "No prose, no markdown fences, no explanation."
+    )
+    try:
+        resp = ollama.chat(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            options={"temperature": 0.2},
+        )
+        raw = resp["message"]["content"].strip()
+        # Strip deepseek-r1 <think>...</think> reasoning blocks
+        raw = re.sub(r'<think>.*?</think>', '', raw, flags=re.DOTALL).strip()
+        # Direct parse
+        try:
+            data = _json.loads(raw)
+        except _json.JSONDecodeError:
+            start, end = raw.find('{'), raw.rfind('}')
+            if start != -1 and end > start:
+                data = _json.loads(raw[start:end + 1])
+            else:
+                return 50.0
+        return max(0.0, min(100.0, float(data.get("conviction", 50))))
+    except Exception:
+        return 50.0
+
+
 _EDGE_UNIVERSES = {
     'buffett':  GOAL_PRESETS.get('buffett',  []),
     'growth':   GOAL_PRESETS.get('growth',   []),
@@ -390,7 +426,12 @@ def _edge_score_bar(score: float, width: int = 20) -> str:
               help='Print raw JSON results instead of table.')
 @click.option('--save/--no-save', default=True, show_default=True,
               help='Persist scan results to edge_scans table.')
-def edge_scan(preset, tickers, min_edge, top, weights, output_json, save):
+@click.option('--llm', 'use_llm', is_flag=True, default=False,
+              help='Query local LLM for a conviction score per ticker (fills the 20%% LLM weight).')
+@click.option('--model', 'llm_model', default='qwen2.5:7b',
+              type=click.Choice(MODELS), show_default=True,
+              help='Ollama model to use for LLM conviction scoring.')
+def edge_scan(preset, tickers, min_edge, top, weights, output_json, save, use_llm, llm_model):
     """Multi-factor edge score scan: buffet-bot edge-scan --universe growth --top 5"""
     # ── Build ticker list ────────────────────────────────────────────────────
     if tickers:
@@ -427,14 +468,24 @@ def edge_scan(preset, tickers, min_edge, top, weights, output_json, save):
         min_edge = float(_CONFIG.get('edge', {}).get('min_score', 60))
 
     label = f"custom ({len(candidates)})" if tickers else preset
+    llm_label = f"[bright_magenta]{llm_model}[/bright_magenta]" if use_llm else "[dim]off[/dim]"
     console.print(Panel(
         f"Universe: [bold bright_cyan]{label}[/bold bright_cyan]  |  "
         f"Tickers: [bold]{len(candidates)}[/bold]  |  "
         f"Min edge: [bold bright_yellow]{min_edge}[/bold bright_yellow]  |  "
-        f"Top: [bold]{top}[/bold]",
+        f"Top: [bold]{top}[/bold]  |  "
+        f"LLM: {llm_label}",
         title="[bold bright_cyan]Multi-Factor Edge Scan[/bold bright_cyan]",
         border_style="bright_cyan",
     ))
+
+    # ── Optional LLM conviction phase (sequential — one Ollama call at a time) ──
+    llm_scores: dict[str, float] = {}
+    if use_llm:
+        console.print(f'[bright_magenta]Querying {llm_model} for conviction scores...[/bright_magenta]')
+        for t in candidates:
+            with console.status(f'[dim magenta]{llm_model} → {t}[/dim magenta]', spinner='dots'):
+                llm_scores[t] = _query_llm_conviction(t, llm_model)
 
     # ── Concurrent scoring ───────────────────────────────────────────────────
     results: list[dict] = []
@@ -442,7 +493,10 @@ def edge_scan(preset, tickers, min_edge, top, weights, output_json, save):
     with console.status('[bright_cyan]Scoring tickers...[/bright_cyan]', spinner='dots'):
         with ThreadPoolExecutor(max_workers=4) as pool:
             future_map = {
-                pool.submit(compute_edge_score, t, custom_weights): t
+                pool.submit(
+                    compute_edge_score, t, custom_weights, None,
+                    llm_scores.get(t, 50.0),
+                ): t
                 for t in candidates
             }
             for fut in as_completed(future_map):
@@ -481,15 +535,17 @@ def edge_scan(preset, tickers, min_edge, top, weights, output_json, save):
         header_style='bold bright_cyan',
         show_lines=False,
     )
-    tbl.add_column('Rank',       justify='right',  style='dim',         no_wrap=True)
-    tbl.add_column('Ticker',     justify='left',   style='bold',        no_wrap=True)
-    tbl.add_column('Edge Score', justify='right',  style='bold',        no_wrap=True)
-    tbl.add_column('Bar',        justify='left',                        no_wrap=True)
-    tbl.add_column('Buffett',    justify='right',  style='bright_cyan', no_wrap=True)
-    tbl.add_column('Insider',    justify='right',  style='bright_cyan', no_wrap=True)
-    tbl.add_column('Politician', justify='right',  style='bright_cyan', no_wrap=True)
-    tbl.add_column('Earnings',   justify='right',  style='bright_cyan', no_wrap=True)
-    tbl.add_column('Analyst',    justify='right',  style='bright_cyan', no_wrap=True)
+    tbl.add_column('Rank',       justify='right',  style='dim',            no_wrap=True)
+    tbl.add_column('Ticker',     justify='left',   style='bold',           no_wrap=True)
+    tbl.add_column('Edge Score', justify='right',  style='bold',           no_wrap=True)
+    tbl.add_column('Bar',        justify='left',                           no_wrap=True)
+    tbl.add_column('Buffett',    justify='right',  style='bright_cyan',    no_wrap=True)
+    tbl.add_column('Insider',    justify='right',  style='bright_cyan',    no_wrap=True)
+    tbl.add_column('Politician', justify='right',  style='bright_cyan',    no_wrap=True)
+    tbl.add_column('Earnings',   justify='right',  style='bright_cyan',    no_wrap=True)
+    tbl.add_column('Analyst',    justify='right',  style='bright_cyan',    no_wrap=True)
+    if use_llm:
+        tbl.add_column('LLM',    justify='right',  style='bright_magenta', no_wrap=True)
 
     for rank, r in enumerate(passing, start=1):
         score = r['edge_score']
@@ -499,7 +555,7 @@ def edge_scan(preset, tickers, min_edge, top, weights, output_json, save):
             else 'bright_yellow' if score >= 50
             else 'bright_red'
         )
-        tbl.add_row(
+        row = [
             str(rank),
             r['ticker'],
             f'[{score_color}]{score:.1f}[/{score_color}]',
@@ -509,7 +565,12 @@ def edge_scan(preset, tickers, min_edge, top, weights, output_json, save):
             f"{c.get('politician', 50.0):.0f}",
             f"{c.get('earnings',   50.0):.0f}",
             f"{c.get('analyst',    50.0):.0f}",
-        )
+        ]
+        if use_llm:
+            llm_val = c.get('llm', 50.0)
+            llm_color = 'bright_green' if llm_val >= 70 else ('bright_yellow' if llm_val >= 50 else 'bright_red')
+            row.append(f'[{llm_color}]{llm_val:.0f}[/{llm_color}]')
+        tbl.add_row(*row)
 
     console.print(tbl)
 
@@ -519,7 +580,8 @@ def edge_scan(preset, tickers, min_edge, top, weights, output_json, save):
         for k, v in w_used.items()
     )
     console.print(f'[dim]Weights:[/dim]  {weight_line}')
+    llm_note = f'  |  LLM: [bright_magenta]{llm_model}[/bright_magenta]' if use_llm else ''
     console.print(
         f'[dim]{len(results)} scored  |  {len(passing)} passed min-edge {min_edge}  |  '
-        f'{"saved to DB" if save else "not saved"}[/dim]'
+        f'{"saved to DB" if save else "not saved"}[/dim]{llm_note}'
     )

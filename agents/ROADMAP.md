@@ -28,15 +28,29 @@
 | 18      | ENG (v0.7.0 — edge.py + edge-scan command, ADR-013) | complete — 2026-03-06 |
 | 19      | QA (v0.7.0 — edge.py + edge-scan + db edge helpers tests) | complete — 2026-03-06 |
 | 20      | QA + ENG async (yfinance crumb fix + automate tests + data coverage) | complete — 2026-03-06 |
-| **21 →**| **ENG (v0.7.0 — LLM injection into edge-scan) OR ENG (v0.8.0 options_engine.py — ADR-014)** | **next** |
+| 21      | ENG (v0.7.0 — LLM injection into edge-scan via --llm flag) | complete — 2026-03-08 |
+| **22 →**| **ENG (v0.7.0 — backtest --edge) OR ENG (v0.8.0 options_engine.py — ADR-014)** | **next** |
 
-**Current milestone:** v0.5.0 SHIPPED. v0.6.0 complete. v0.7.0 Edge Score complete. Automate crumb bug fixed. 290 tests passing.
+**Current milestone:** v0.5.0 SHIPPED. v0.6.0 complete. v0.7.0 Edge Score + LLM injection complete. 290 tests passing.
 **Do NOT take Security Auditor** until v1.0.0 milestone is explicitly started.
-**Session 21 focus:** ENG — wire Ollama `llm_score` injection into `edge-scan`, OR begin `options_engine.py` (ADR-014).
+**Session 22 focus:** ENG — implement `_run_edge_backtest()` + `backtest --edge` flag, OR begin `options_engine.py` (ADR-014).
 
 ---
 
 ## Session Handoff Log
+
+### 2026-03-08 — Software Engineer (session 21 — v0.7.0 LLM injection into edge-scan)
+**Role taken:** Software Engineer [ENG] — v0.7.0 LLM conviction score injection
+**What was done:**
+- **`buffet_bot/cmd_intel.py`**: `_query_llm_conviction(ticker, model) -> float` helper — sends compact Buffett-framed prompt to Ollama, parses `{"conviction": N}` JSON response (with deepseek `<think>` stripping + outermost-`{}` fallback), clamps to 0–100, returns 50.0 on any failure (graceful degradation)
+- **`edge-scan --llm` flag**: triggers sequential LLM query phase per ticker before concurrent `compute_edge_score()` fan-out; pre-computed `llm_scores` dict passed as `llm_score` arg to each `compute_edge_score()` call — properly fills the 20% W_LLM weight slot
+- **`edge-scan --model` flag**: choose `deepseek-r1` or `qwen2.5:7b` (default `qwen2.5:7b` — faster for bulk conviction scoring)
+- **Display**: header panel shows `LLM: <model>` or `LLM: off`; `LLM` column added to results table (bright_magenta, color-coded green/yellow/red) only when `--llm` is active; footer shows model name
+- **290 tests pass** — no regressions
+
+**Next:** ENG session 22 — `_run_edge_backtest()` in `backtest.py` + `backtest --edge` flag (v0.7.0 remaining item); OR begin `options_engine.py` (v0.8.0, ADR-014)
+
+---
 
 ### 2026-03-06 — QA + ENG async (session 20 — yfinance crumb fix + automate + data coverage)
 **Role taken:** QA Engineer [QA] — async with Architect token-reduction audit
@@ -412,6 +426,7 @@
 - [x] [ENG] `[edge]` section in `_CONFIG_DEFAULTS` (globals.py): configurable signal weights (W_BUFFETT=0.30, W_LLM=0.20, W_INSIDER=0.20, W_POLITICIAN=0.10, W_EARNINGS=0.10, W_ANALYST=0.10) — complete 2026-03-06 (session 18)
 - [x] [ENG] `db.py`: `edge_scans` table for persisting scan results — complete 2026-03-06 (session 18)
 - [x] [ENG] `edge-scan` command in `cmd_intel.py`: `--universe`, `--min-edge`, `--top`, `--weights`, `--json` — complete 2026-03-06 (session 18)
+- [x] [ENG] `edge-scan --llm` flag: `_query_llm_conviction()` helper; sequential Ollama conviction queries per ticker; `llm_score` injected into `compute_edge_score()`; LLM column in results table; `--model` flag — complete 2026-03-08 (session 21)
 - [ ] [ENG] `_run_edge_backtest()` in `backtest.py`: weekly-rebalanced EDGE portfolio vs SPY (no lookahead bias — filter all signals by `simulation_date`)
 - [ ] [ENG] `backtest --edge` flag wiring
 
@@ -494,12 +509,12 @@
 
 | Field | Value |
 |-------|-------|
-| **Next session role** | QA (v0.6.0 + v0.7.0 tests) OR ENG (v0.7.0 backtest --edge + v0.8.0) |
-| **Suggested focus (QA)** | Add tests to `tests/test_db.py` for `compound_log`/`sweeps` helpers; add `tests/test_edge.py` for edge score components + lookahead bias; verify 238+ tests pass |
-| **Suggested focus (ENG)** | Implement `_run_edge_backtest()` in `backtest.py` + `backtest --edge` flag; OR begin v0.8.0 options engine (ADR-014) |
+| **Next session role** | ENG (v0.7.0 backtest --edge) OR ENG (v0.8.0 options_engine.py) |
+| **Suggested focus (ENG-A)** | Implement `_run_edge_backtest()` in `backtest.py` + `backtest --edge` flag (completes v0.7.0) |
+| **Suggested focus (ENG-B)** | Begin `options_engine.py` (v0.8.0, ADR-014): `_fetch_options_chain()`, `_find_optimal_covered_call()`, `_find_optimal_csp()` |
 | **Do NOT take** | Security Auditor (gated to v1.0.0 pre-release) |
-| **Reminder** | `live_guard.py` and `edge.py` now committed (session 19). All v0.6.0 + v0.7.0 core items complete. |
-| **Last updated** | 2026-03-06 by Architect Agent (session 19) |
+| **Reminder** | v0.7.0 remaining open: `backtest --edge` + lookahead bias QA. v0.8.0 unblocked (ADR-014 written). |
+| **Last updated** | 2026-03-08 by ENG Agent (session 21) |
 
 ---
 
