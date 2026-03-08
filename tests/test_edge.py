@@ -205,7 +205,22 @@ class TestComputeEarningsSignal:
         mock_history = MagicMock(return_value=[])
         with patch('buffet_bot.edge.get_earnings_history', mock_history):
             compute_earnings_signal('AAPL', lookback_quarters=8)
-        mock_history.assert_called_once_with('AAPL', limit=8)
+        mock_history.assert_called_once_with('AAPL', limit=8, before_date=None)
+
+    def test_simulation_date_passes_before_date(self):
+        """simulation_date must be forwarded to get_earnings_history as before_date."""
+        mock_history = MagicMock(return_value=[])
+        cutoff = datetime(2025, 6, 30)
+        with patch('buffet_bot.edge.get_earnings_history', mock_history):
+            compute_earnings_signal('AAPL', simulation_date=cutoff)
+        mock_history.assert_called_once_with('AAPL', limit=4, before_date='2025-06-30')
+
+    def test_simulation_date_filters_future_earnings(self):
+        """Earnings reported on/after simulation_date must be excluded (returns neutral)."""
+        # Simulate DB returning [] because before_date filters all rows out
+        with patch('buffet_bot.edge.get_earnings_history', return_value=[]):
+            score = compute_earnings_signal('AAPL', simulation_date=datetime(2024, 1, 1))
+        assert score == 50.0
 
 
 # ── _analyst_to_score ─────────────────────────────────────────────────────────
@@ -423,3 +438,25 @@ class TestComputeEdgeScore:
         finally:
             for p in patches: p.stop()
         assert set(result['weights_used'].keys()) == set(DEFAULT_WEIGHTS.keys())
+
+    def test_simulation_date_propagated_to_earnings(self):
+        """compute_edge_score must forward simulation_date to compute_earnings_signal."""
+        mock_earnings = MagicMock(return_value=50.0)
+        patches = [
+            patch('buffet_bot.edge.get_buffett_metrics',        return_value={'score': 50}),
+            patch('buffet_bot.edge.get_analyst_consensus',      return_value={'upside_pct': 0.0}),
+            patch('buffet_bot.edge.fetch_insider_transactions', return_value=[]),
+            patch('buffet_bot.edge.fetch_house_trades',         return_value=[]),
+            patch('buffet_bot.edge.fetch_fmp_trades',           return_value=[]),
+            patch('buffet_bot.edge.merge_deduplicate',          return_value=[]),
+            patch('buffet_bot.edge.compute_earnings_signal',    mock_earnings),
+        ]
+        sim = datetime(2025, 3, 15)
+        for p in patches: p.start()
+        try:
+            compute_edge_score('AAPL', simulation_date=sim)
+        finally:
+            for p in patches: p.stop()
+        # compute_earnings_signal must have been called with simulation_date
+        mock_earnings.assert_called_once_with('AAPL', simulation_date=sim)
+

@@ -620,27 +620,52 @@ def log_earnings_result(ticker: str, report_date: str,
         return False
 
 
-def get_earnings_history(ticker: str = '', limit: int = 20) -> list[dict]:
-    """Return recent earnings_surprises rows. Pass ticker='' for all tickers."""
+def get_earnings_history(ticker: str = '', limit: int = 20,
+                         before_date: str | None = None) -> list[dict]:
+    """Return recent earnings_surprises rows. Pass ticker='' for all tickers.
+
+    before_date : ISO date string (YYYY-MM-DD); when set, only rows with
+                  report_date < before_date are returned (anti-lookahead bias).
+    """
     try:
         conn = sqlite3.connect(DB_PATH)
         if ticker:
-            rows = conn.execute(
-                """SELECT ticker, report_date, eps_actual, eps_forecast,
-                          surprise_pct, beat_miss
-                   FROM earnings_surprises
-                   WHERE ticker = ?
-                   ORDER BY report_date DESC LIMIT ?""",
-                (ticker.upper(), limit),
-            ).fetchall()
+            if before_date:
+                rows = conn.execute(
+                    """SELECT ticker, report_date, eps_actual, eps_forecast,
+                              surprise_pct, beat_miss
+                       FROM earnings_surprises
+                       WHERE ticker = ? AND report_date < ?
+                       ORDER BY report_date DESC LIMIT ?""",
+                    (ticker.upper(), before_date, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT ticker, report_date, eps_actual, eps_forecast,
+                              surprise_pct, beat_miss
+                       FROM earnings_surprises
+                       WHERE ticker = ?
+                       ORDER BY report_date DESC LIMIT ?""",
+                    (ticker.upper(), limit),
+                ).fetchall()
         else:
-            rows = conn.execute(
-                """SELECT ticker, report_date, eps_actual, eps_forecast,
-                          surprise_pct, beat_miss
-                   FROM earnings_surprises
-                   ORDER BY report_date DESC LIMIT ?""",
-                (limit,),
-            ).fetchall()
+            if before_date:
+                rows = conn.execute(
+                    """SELECT ticker, report_date, eps_actual, eps_forecast,
+                              surprise_pct, beat_miss
+                       FROM earnings_surprises
+                       WHERE report_date < ?
+                       ORDER BY report_date DESC LIMIT ?""",
+                    (before_date, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT ticker, report_date, eps_actual, eps_forecast,
+                              surprise_pct, beat_miss
+                       FROM earnings_surprises
+                       ORDER BY report_date DESC LIMIT ?""",
+                    (limit,),
+                ).fetchall()
         conn.close()
         cols = ['ticker', 'report_date', 'eps_actual', 'eps_forecast',
                 'surprise_pct', 'beat_miss']

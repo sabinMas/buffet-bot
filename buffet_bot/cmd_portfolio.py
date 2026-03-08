@@ -28,7 +28,7 @@ from buffet_bot.projections import (
     _calculate_future_value, _get_portfolio_expected_return, _get_ai_expected_return,
     _run_monte_carlo, _display_mc_chart, _years_to_reach,
 )
-from buffet_bot.backtest import _run_backtest
+from buffet_bot.backtest import _run_backtest, _run_edge_backtest
 from buffet_bot.db import (
     log_compound_event, get_compound_history,
     get_watchlist,
@@ -144,13 +144,179 @@ def rebalance(execute, include_cash):
 
 
 @click.command()
-@click.argument('ticker', shell_complete=_complete_ticker)
-@click.option('--period',  default=1.0,     show_default=True, type=float, help='Period in years.')
-@click.option('--capital', default=10000.0, show_default=True, type=float, help='Starting capital ($).')
+@click.argument('ticker', required=False, default=None, shell_complete=_complete_ticker)
+@click.option('--period',    default=1.0,     show_default=True, type=float, help='Period in years.')
+@click.option('--capital',   default=10000.0, show_default=True, type=float, help='Starting capital ($).')
 @click.option('--compare/--no-compare', default=True, show_default=True,
               help='Compare against SPY buy-and-hold benchmark.')
-def backtest(ticker, period, capital, compare):
-    """Backtest RSI strategy on a ticker: buffet-bot backtest AAPL --period 2 --capital 10000"""
+@click.option('--edge',      'use_edge', is_flag=True, default=False,
+              help='Run edge-score portfolio backtest instead of single-ticker RSI strategy.')
+@click.option('--universe',  'preset', default='buffett', show_default=True,
+              type=click.Choice(['buffett', 'growth', 'income', 'balanced', 'etf', 'watchlist']),
+              help='Universe to screen for --edge mode.')
+@click.option('--tickers',   multiple=True, metavar='TICKER',
+              help='Explicit tickers for --edge mode (overrides --universe).')
+@click.option('--min-edge',  default=60.0, show_default=True, type=float,
+              help='Minimum edge score threshold for --edge mode.')
+@click.option('--top',       default=5, show_default=True, type=int,
+              help='Max tickers to hold in --edge portfolio.')
+@click.option('--weights',   default=None, type=str,
+              help='JSON edge factor weight override for --edge mode.')
+def backtest(ticker, period, capital, compare, use_edge, preset, tickers, min_edge, top, weights):
+    """Backtest RSI strategy on a ticker, or edge-score portfolio:
+
+    \b
+      buffet-bot backtest AAPL --period 2
+      buffet-bot backtest --edge --universe growth --top 5 --period 2
+    """
+    if use_edge:
+        # ── Edge portfolio backtest ───────────────────────────────────────────
+        weights_override = None
+        if weights:
+            try:
+                weights_override = {k: float(v) for k, v in json.loads(weights).items()}
+            except Exception:
+                console.print(f'[red]Invalid --weights JSON: {weights}[/red]')
+                return
+
+        if tickers:
+            candidates = [t.upper() for t in tickers]
+        elif preset == 'watchlist':
+            from buffet_bot.db import get_watchlist as _gwl
+            candidates = [r['ticker'] for r in _gwl()]
+        else:
+            candidates = list(GOAL_PRESETS.get(preset, []))
+
+        if not candidates:
+            console.print('[red]No tickers for edge backtest.[/red]')
+            return
+
+        label = f'custom ({len(candidates)})' if tickers else preset
+        console.print(Panel(
+            f'Universe: [bold bright_cyan]{label}[/bold bright_cyan]  |  '
+            f'Period: [bold]{period:.1f}yr[/bold]  |  '
+            f'Capital: [bright_green]${capital:,.0f}[/bright_green]  |  '
+            f'Min edge: [bold bright_yellow]{min_edge}[/bold bright_yellow]  |  '
+            f'Top: [bold]{top}[/bold]',
+            title=_make_panel_title('Edge Portfolio Backtest', 'bright_cyan'),
+            border_style='bright_cyan', box=box.ROUNDED,
+        ))
+
+        result = _run_edge_backtest(
+            candidates, period_years=period, initial_capital=capital,
+            min_edge=min_edge, top_n=top, weights_override=weights_override,
+        )
+
+        if result is None:
+            console.print(
+                '[bright_red]Edge backtest failed — no tickers passed the edge filter '
+                f'(>= {min_edge}) or insufficient price history.[/bright_red]'
+            )
+            return
+
+        # Selected tickers summary
+        sel_tbl = Table(
+            title='Selected Portfolio', box=box.ROUNDED,
+            header_style='bold bright_cyan', show_lines=False,
+        )
+        sel_tbl.add_column('Ticker',      style='bold',          no_wrap=True)
+        sel_tbl.add_column('Edge Score',  justify='right',       style='bold')
+        sel_tbl.add_column('Buffett',     justify='right',       style='bright_cyan')
+        sel_tbl.add_column('Insider',     justify='right',       style='bright_cyan')
+        sel_tbl.add_column('Politician',  justify='right',       style='bright_cyan')
+        sel_tbl.add_column('Earnings',    justify='right',       style='bright_cyan')
+        sel_tbl.add_column('Analyst',     justify='right',       style='bright_cyan')
+        for r in result['selected']:
+            sc = r.get('edge_score', 0)
+            c  = r.get('components', {})
+            sc_color = 'bright_green' if sc >= 70 else ('bright_yellow' if sc >= 50 else 'bright_red')
+            sel_tbl.add_row(
+                r['ticker'],
+                f'[{sc_color}]{sc:.1f}[/{sc_color}]',
+                f"{c.get('buffett', 50):.0f}",
+                f"{c.get('insider', 50):.0f}",
+                f"{c.get('politician', 50):.0f}",
+                f"{c.get('earnings', 50):.0f}",
+                f"{c.get('analyst', 50):.0f}",
+            )
+        console.print(sel_tbl)
+
+        if result['excluded']:
+            excl_str = ', '.join(
+                f"{r['ticker']}({r['edge_score']:.0f})" for r in result['excluded'][:8]
+            )
+            console.print(f'[dim]Excluded (below {min_edge}): {excl_str}[/dim]')
+
+        # Performance metrics table
+        m   = result['metrics']
+        spm = result['spy_metrics']
+        perf_tbl = Table(
+            title='Performance vs SPY', box=box.ROUNDED,
+            header_style='bold bright_cyan',
+        )
+        perf_tbl.add_column('Metric',     style='bold bright_white')
+        perf_tbl.add_column('EDGE Portfolio', justify='right', style='bright_white')
+        if spm:
+            perf_tbl.add_column('SPY (B&H)', justify='right', style='dim bright_white')
+
+        def _erow(label: str, key: str, fmt_fn, color_fn):
+            val = m.get(key)
+            vs  = fmt_fn(val) if val is not None else '—'
+            vc  = color_fn(val) if val is not None else 'bright_white'
+            row = [label, f'[{vc}]{vs}[/{vc}]']
+            if spm:
+                sv = spm.get(key)
+                row.append(fmt_fn(sv) if sv is not None else '—')
+            perf_tbl.add_row(*row)
+
+        _erow('Total Return', 'total_return', lambda v: f'{v:.1%}',
+              lambda v: 'bright_green' if v > 0 else 'bright_red')
+        _erow('CAGR',         'cagr',         lambda v: f'{v:.1%}',
+              lambda v: 'bright_green' if v > 0.09 else 'bright_yellow' if v > 0 else 'bright_red')
+        _erow('Sharpe Ratio', 'sharpe',       lambda v: f'{v:.2f}',
+              lambda v: 'bright_green' if v > 1 else 'bright_yellow' if v > 0.5 else 'bright_red')
+        _erow('Max Drawdown', 'max_drawdown', lambda v: f'{v:.1%}',
+              lambda v: 'bright_green' if v < 0.20 else 'bright_yellow' if v < 0.30 else 'bright_red')
+        _erow('Final Value',  'final_value',  lambda v: f'${v:,.2f}',
+              lambda v: 'bright_green' if v > capital else 'bright_red')
+
+        if m.get('alpha') is not None:
+            alpha = m['alpha']
+            ac    = 'bright_green' if alpha > 0 else 'bright_red'
+            perf_tbl.add_row(
+                'Alpha (vs SPY)',
+                f'[{ac}]{alpha:+.1%}[/{ac}]',
+                *(['—'] if spm else []),
+            )
+
+        console.print(perf_tbl)
+
+        # Equity curve chart
+        if result['equity_curve']:
+            ec  = result['equity_curve']
+            spy = result['spy_equity']
+            step = max(1, len(ec) // 60)
+            xs   = list(range(0, len(ec), step))
+            try:
+                plt.clf()
+                plt.plot(xs, [ec[i] for i in xs], color='cyan', label='EDGE Portfolio')
+                if spy:
+                    plt.plot(xs, [spy[i] for i in xs], color='yellow', label='SPY B&H')
+                plt.title(f'Edge Portfolio Backtest — {period:.1f}yr')
+                plt.xlabel('Trading Days')
+                plt.ylabel('Value ($)')
+                plt.show()
+            except Exception as e:
+                console.print(f'[dim]Chart unavailable: {e}[/dim]')
+
+        console.print(f'[dim italic]{result["disclaimer"]}[/dim italic]')
+        return
+
+    # ── Single-ticker RSI backtest (original behaviour) ───────────────────────
+    if not ticker:
+        console.print('[red]Provide a TICKER argument, or use --edge for portfolio mode.[/red]')
+        return
+
     ticker = ticker.upper()
     console.print(Panel(
         f"[bold bright_white]{ticker}[/bold bright_white]  |  Period: {period:.1f}yr  |  Capital: [bright_green]${capital:,.0f}[/bright_green]",

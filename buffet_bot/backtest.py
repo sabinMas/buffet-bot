@@ -1,4 +1,10 @@
 """Backtesting engine — RSI strategy, Sharpe, drawdown, multi-frame signals."""
+from __future__ import annotations
+
+import json as _json
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta
+
 import numpy as np
 import pandas as pd
 import yfinance as yf
@@ -176,3 +182,166 @@ def _run_backtest(ticker, period_years, initial_capital, compare_spy, buy_and_ho
     except Exception as e:
         console.print(f"[red]Backtest error: {e}[/red]")
         return None, [], [], None
+
+
+def _run_edge_backtest(
+    tickers: list[str],
+    period_years: float = 2.0,
+    initial_capital: float = 10_000.0,
+    min_edge: float = 60.0,
+    top_n: int = 5,
+    weights_override: dict[str, float] | None = None,
+) -> dict | None:
+    """Backtest an equal-weight portfolio of top-EDGE_SCORE tickers vs SPY.
+
+    Edge scores are computed once at the current date (using all available
+    historical signals filtered to today).  The portfolio holds the top
+    ``top_n`` tickers that score >= ``min_edge``, equal-weighted, for the
+    full ``period_years`` window.  Daily price data is fetched from yfinance.
+
+    Anti-lookahead note
+    -------------------
+    Insider, politician, and earnings signals respect ``simulation_date``
+    (set to today) and only use data already in the local SQLite DB.
+    Buffett (yfinance) and analyst signals use current fundamentals as a
+    proxy — this is disclosed in the returned ``disclaimer`` field.
+
+    Returns
+    -------
+    {
+        'selected':       list[dict],   # [{ticker, edge_score, components}, ...]
+        'excluded':       list[dict],   # tickers below min_edge
+        'equity_curve':   list[float],
+        'spy_equity':     list[float],
+        'dates':          list[str],
+        'metrics':        dict,
+        'spy_metrics':    dict,
+        'period_years':   float,
+        'initial_capital':float,
+        'min_edge':       float,
+        'disclaimer':     str,
+    }
+    or None on failure.
+    """
+    # ── 1. Score all tickers concurrently ────────────────────────────────────
+    from buffet_bot.edge import compute_edge_score  # lazy import avoids circular
+
+    score_results: list[dict] = []
+    with console.status('[dim]Computing edge scores...[/dim]', spinner='dots'):
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = {
+                pool.submit(compute_edge_score, t, weights_override): t
+                for t in tickers
+            }
+            for fut in as_completed(futures):
+                try:
+                    score_results.append(fut.result())
+                except Exception:
+                    pass
+
+    if not score_results:
+        return None
+
+    score_results.sort(key=lambda r: r['edge_score'], reverse=True)
+    selected = [r for r in score_results if r['edge_score'] >= min_edge][:top_n]
+    excluded = [r for r in score_results if r['edge_score'] < min_edge or
+                score_results.index(r) >= top_n]
+
+    if not selected:
+        return None
+
+    selected_tickers = [r['ticker'] for r in selected]
+
+    # ── 2. Download price history ─────────────────────────────────────────────
+    period_str = f'{max(1, int(period_years * 365))}d'
+    dl_tickers = selected_tickers + ['SPY']
+    try:
+        raw = yf.download(dl_tickers, period=period_str, auto_adjust=True, progress=False)
+        if isinstance(raw.columns, pd.MultiIndex):
+            close = raw['Close']
+        else:
+            close = raw[['Close']]
+        close = close.dropna(how='all')
+    except Exception as e:
+        console.print(f'[red]Edge backtest download failed: {e}[/red]')
+        return None
+
+    if len(close) < 30:
+        return None
+
+    # ── 3. Build daily equity curve ───────────────────────────────────────────
+    available = [t for t in selected_tickers if t in close.columns]
+    if not available:
+        return None
+
+    portfolio_close = close[available].ffill().dropna(how='all')
+    spy_close = close['SPY'].dropna() if 'SPY' in close.columns else None
+
+    # Align dates across portfolio tickers
+    portfolio_close = portfolio_close.dropna(how='any')
+    if portfolio_close.empty:
+        return None
+
+    n = len(portfolio_close)
+    dates = [str(portfolio_close.index[i])[:10] for i in range(n)]
+
+    # Equal-weight: each ticker gets 1/N of capital at day 0
+    n_held = len(available)
+    alloc = initial_capital / n_held
+    initial_prices = portfolio_close.iloc[0]
+
+    # Shares per ticker (fixed at start — pure buy-and-hold equal-weight)
+    shares = {t: alloc / float(initial_prices[t]) for t in available}
+
+    equity_curve: list[float] = []
+    for i in range(n):
+        day_value = sum(shares[t] * float(portfolio_close.iloc[i][t]) for t in available)
+        equity_curve.append(day_value)
+
+    # ── 4. SPY equity curve (buy-and-hold) ────────────────────────────────────
+    spy_equity: list[float] = []
+    if spy_close is not None:
+        spy_aligned = spy_close.reindex(portfolio_close.index).ffill().dropna()
+        if not spy_aligned.empty:
+            spy_shares = initial_capital / float(spy_aligned.iloc[0])
+            spy_equity = [spy_shares * float(spy_aligned.iloc[i])
+                          for i in range(len(spy_aligned))]
+
+    # ── 5. Metrics ────────────────────────────────────────────────────────────
+    def _metrics_from_curve(curve: list[float]) -> dict:
+        eq = np.array(curve, dtype=float)
+        total_return = (eq[-1] - eq[0]) / eq[0]
+        cagr = (eq[-1] / eq[0]) ** (1.0 / max(period_years, 0.01)) - 1
+        dr = pd.Series(np.diff(eq) / np.where(eq[:-1] == 0, 1.0, eq[:-1]))
+        return {
+            'total_return': round(float(total_return), 4),
+            'cagr':         round(float(cagr), 4),
+            'sharpe':       round(_calculate_sharpe(dr), 3),
+            'max_drawdown': round(_calculate_max_drawdown(curve), 4),
+            'final_value':  round(float(eq[-1]), 2),
+        }
+
+    metrics = _metrics_from_curve(equity_curve)
+    spy_metrics = _metrics_from_curve(spy_equity) if spy_equity else {}
+
+    alpha = round(metrics['cagr'] - spy_metrics.get('cagr', 0), 4) if spy_metrics else None
+    metrics['alpha'] = alpha
+    metrics['n_tickers'] = n_held
+
+    return {
+        'selected':        selected,
+        'excluded':        excluded,
+        'equity_curve':    equity_curve,
+        'spy_equity':      spy_equity,
+        'dates':           dates,
+        'metrics':         metrics,
+        'spy_metrics':     spy_metrics,
+        'period_years':    period_years,
+        'initial_capital': initial_capital,
+        'min_edge':        min_edge,
+        'disclaimer': (
+            'Buffett and analyst signals use current fundamentals as a proxy. '
+            'Insider/politician/earnings signals are filtered to historical DB data. '
+            'Past performance does not predict future results.'
+        ),
+    }

@@ -95,12 +95,16 @@ def compute_politician_signal(
     return round(buys / total * 100, 1)
 
 
-def compute_earnings_signal(ticker: str, lookback_quarters: int = 4) -> float:
+def compute_earnings_signal(ticker: str, lookback_quarters: int = 4,
+                            simulation_date=None) -> float:
     """0–100 score from earnings beat rate over recent quarters.
 
     100 = beat every quarter; 0 = missed every quarter; 50 = no data.
+    simulation_date: if set, excludes earnings reported on/after this date
+                     (anti-lookahead bias for backtesting).
     """
-    rows = get_earnings_history(ticker, limit=lookback_quarters)
+    before = simulation_date.strftime('%Y-%m-%d') if simulation_date else None
+    rows = get_earnings_history(ticker, limit=lookback_quarters, before_date=before)
     if not rows:
         return 50.0
     beats = sum(1 for r in rows if r.get('beat_miss') == 'BEAT')
@@ -175,7 +179,7 @@ def compute_edge_score(
         return 'politician', compute_politician_signal(ticker, simulation_date=simulation_date)
 
     def _earnings():
-        return 'earnings', compute_earnings_signal(ticker)
+        return 'earnings', compute_earnings_signal(ticker, simulation_date=simulation_date)
 
     def _analyst():
         return 'analyst', _analyst_to_score(get_analyst_consensus(ticker))

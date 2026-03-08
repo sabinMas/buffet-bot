@@ -509,3 +509,73 @@ class TestEdgeTable:
         monkeypatch.setattr('buffet_bot.db.DB_PATH', '/nonexistent/path/test.db')
         from buffet_bot.db import get_edge_history
         assert get_edge_history() == []
+
+
+# ── get_earnings_history before_date filter (anti-lookahead bias) ─────────────
+
+class TestEarningsHistoryBeforeDate:
+    """Tests for get_earnings_history() before_date parameter (anti-lookahead)."""
+
+    def _seed_earnings(self, db_path, ticker='AAPL', rows=None):
+        """Insert earnings rows directly into the test DB."""
+        import sqlite3
+        conn = sqlite3.connect(db_path)
+        for r in (rows or []):
+            conn.execute(
+                """INSERT OR IGNORE INTO earnings_surprises
+                   (ticker, report_date, eps_actual, eps_forecast,
+                    surprise_pct, beat_miss, logged_at)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (ticker, r['date'], r['eps_a'], r['eps_f'], r['surprise'],
+                 r['beat_miss'], '2026-01-01T00:00:00+00:00'),
+            )
+        conn.commit()
+        conn.close()
+
+    def test_before_date_excludes_future_rows(self, in_memory_db, monkeypatch):
+        """Rows with report_date >= before_date must not be returned."""
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', in_memory_db)
+        from buffet_bot.db import get_earnings_history
+        self._seed_earnings(in_memory_db, rows=[
+            {'date': '2024-01-01', 'eps_a': 2.0, 'eps_f': 1.5, 'surprise': 33.3, 'beat_miss': 'BEAT'},
+            {'date': '2025-06-01', 'eps_a': 1.0, 'eps_f': 1.5, 'surprise': -33.3, 'beat_miss': 'MISS'},
+        ])
+        rows = get_earnings_history('AAPL', before_date='2025-01-01')
+        assert len(rows) == 1
+        assert rows[0]['report_date'] == '2024-01-01'
+
+    def test_before_date_none_returns_all_rows(self, in_memory_db, monkeypatch):
+        """Without before_date, all rows are returned (existing behaviour unchanged)."""
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', in_memory_db)
+        from buffet_bot.db import get_earnings_history
+        self._seed_earnings(in_memory_db, rows=[
+            {'date': '2024-01-01', 'eps_a': 2.0, 'eps_f': 1.5, 'surprise': 33.3, 'beat_miss': 'BEAT'},
+            {'date': '2025-06-01', 'eps_a': 1.0, 'eps_f': 1.5, 'surprise': -33.3, 'beat_miss': 'MISS'},
+        ])
+        rows = get_earnings_history('AAPL', before_date=None)
+        assert len(rows) == 2
+
+    def test_before_date_all_rows_filtered_returns_empty(self, in_memory_db, monkeypatch):
+        """If before_date is before all rows, result is empty (no crash)."""
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', in_memory_db)
+        from buffet_bot.db import get_earnings_history
+        self._seed_earnings(in_memory_db, rows=[
+            {'date': '2026-01-01', 'eps_a': 2.0, 'eps_f': 1.5, 'surprise': 33.3, 'beat_miss': 'BEAT'},
+        ])
+        rows = get_earnings_history('AAPL', before_date='2020-01-01')
+        assert rows == []
+
+    def test_before_date_no_ticker_filter(self, in_memory_db, monkeypatch):
+        """before_date works when ticker='' (all-ticker query path)."""
+        monkeypatch.setattr('buffet_bot.db.DB_PATH', in_memory_db)
+        from buffet_bot.db import get_earnings_history
+        self._seed_earnings(in_memory_db, 'AAPL', rows=[
+            {'date': '2024-06-01', 'eps_a': 2.0, 'eps_f': 1.5, 'surprise': 33.3, 'beat_miss': 'BEAT'},
+        ])
+        self._seed_earnings(in_memory_db, 'MSFT', rows=[
+            {'date': '2025-06-01', 'eps_a': 2.0, 'eps_f': 1.5, 'surprise': 33.3, 'beat_miss': 'BEAT'},
+        ])
+        rows = get_earnings_history('', before_date='2025-01-01')
+        tickers = {r['ticker'] for r in rows}
+        assert 'AAPL' in tickers
+        assert 'MSFT' not in tickers

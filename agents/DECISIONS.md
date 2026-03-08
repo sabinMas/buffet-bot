@@ -22,6 +22,65 @@
 
 ---
 
+## ADR-016: Options Engine Implementation — Black-Scholes, IV Surface, Strategy Selection
+- **Date:** 2026-03-08
+- **Status:** Accepted
+- **Decided by:** Architect Agent (session 21)
+
+**Context:**
+
+ADR-014 (session 16) defined the interface contract for `options_engine.py`. This ADR documents the implementation decisions made while building the full module.
+
+**Decision: Black-Scholes over Binomial Tree**
+
+Black-Scholes is used for all pricing and Greeks calculations. Rationale:
+1. **Closed-form solution**: O(1) per contract vs O(n^2) for a binomial tree with n steps. For bulk screening of hundreds of contracts across multiple tickers, computational cost matters.
+2. **European approximation is acceptable**: yfinance options chains are for US-listed options (American-style), but the Black-Scholes European price is within ~1-2% of American price for non-dividend-paying stocks, and the delta/gamma/theta/vega Greeks are nearly identical. For income strategy screening (not precise arbitrage), this accuracy is more than sufficient.
+3. **No new dependencies**: Black-Scholes is implemented with `math.erf` (stdlib) and `math.exp`. No `py_vollib`, no `scipy.stats.norm` needed. This aligns with the project's lightweight, local-first philosophy (architect.md section 5, Dependency Governance).
+4. **Alternative considered**: Binomial tree (Cox-Ross-Rubinstein) would handle early exercise better but adds significant complexity and compute time for negligible practical benefit in a screening tool.
+
+**Decision: IV Estimation via Newton-Raphson**
+
+Implied volatility is estimated by inverting Black-Scholes using Newton-Raphson iteration. This is the standard approach for IV calculation:
+- Initial guess: sigma = 0.30 (near market average)
+- Convergence tolerance: 1e-5 (sufficient for 4-decimal IV)
+- Max iterations: 100 (never observed to need >20 for liquid contracts)
+- Returns `None` for degenerate inputs (zero premium, zero price, extreme strikes) to avoid garbage-in-garbage-out
+
+**Decision: yfinance as Data Source for Options Chains**
+
+yfinance `Ticker.options` + `option_chain(expiry)` is the sole data source. Rationale:
+- Already a project dependency (Tier: Data, per architect.md)
+- Provides strike, bid, ask, volume, open_interest, impliedVolatility, inTheMoney
+- Free, no API key required
+- Limitation: yfinance IV is sometimes stale or zero; the module falls back to its own Newton-Raphson IV when yfinance IV is unavailable
+- No Alpaca options chain API exists for paper accounts
+
+**Decision: Delta Proxy for Contract Selection**
+
+When yfinance `impliedVolatility` is unavailable (zero or missing), strike/price ratio is used as a delta proxy:
+- 0.30 delta call ~ strike/spot in [1.03, 1.07]
+- 0.20 delta put ~ strike/spot in [0.88, 0.93]
+When IV is available, full Black-Scholes delta is computed and used instead. This two-tier approach ensures the screener always works, even with spotty data.
+
+**Decision: Strategy Selection Logic**
+
+The LLM recommendation (`get_options_recommendation()`) uses the same Ollama pattern as `_run_analysis()` in `analysis.py`:
+- Single-model query (not dual-consensus) since this is advisory, not trade-triggering
+- JSON extraction via `content.find('{')` pattern (same as `analyze_news_sentiment`)
+- After LLM picks a strategy, the engine finds the actual optimal contract for that strategy
+- Fallback: returns `None` if LLM is unavailable or JSON parsing fails
+
+**Consequences:**
+- No new dependencies added to `requirements.txt`
+- `options_engine.py` is a pure computation module; no `print()`, no Rich output, no order placement
+- The `_yf_semaphore` from `data.py` is respected for all yfinance calls (prevents crumb corruption)
+- All strategy functions return `None` on failure, consistent with `risk.py` and `data.py` patterns
+- `LIVE_MODE` gating for `--execute` paths remains in `cmd_intel.py`, not in this module
+- The module depends on `edge.py` (for wheel strategy scoring CSP filtering); this dependency exists and is satisfied since v0.7.0 shipped
+
+---
+
 ## ADR-015: Macro Regime Engine — `buffet_bot/macro.py`
 - **Date:** 2026-03-06
 - **Status:** Accepted

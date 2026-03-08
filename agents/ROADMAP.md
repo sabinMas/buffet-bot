@@ -31,15 +31,37 @@
 | 21      | ENG (v0.7.0 — LLM injection into edge-scan via --llm flag) | complete — 2026-03-08 |
 | 22      | Architect (v0.8.0 — options_engine.py full implementation, ADR-016) | complete — 2026-03-08 |
 | 23      | ENG (v0.8.0 — options-income CLI + options_positions DB table) | complete — 2026-03-08 |
-| **24 →**| **QA (v0.8.0 — options_engine tests + options_positions DB tests + CLI tests)** | **next** |
+| 24      | QA (v0.8.0 — options_engine tests + options_positions DB tests + CLI tests) | complete — 2026-03-08 |
+| 25      | PM (automate perf investigation — task backlog created) | complete — 2026-03-08 |
+| **26 →**| **buffet-bot-perf-engineer (automate performance — 8 tasks in task tracker)** | **next** |
 
 **Current milestone:** v0.5.0 SHIPPED. v0.6.0 complete. v0.7.0 complete. v0.8.0 options-income CLI complete. 290 tests passing.
 **Do NOT take Security Auditor** until v1.0.0 milestone is explicitly started.
-**Session 24 focus:** QA — tests for options_engine (Black-Scholes, annualized_yield, find_optimal_covered_call, find_optimal_csp), options_positions DB CRUD helpers, and CLI sub-commands via CliRunner.
+**Session 26 focus:** Performance Engineer — work through tasks #1–#8 in the task tracker to fix the automate command's 10-minute runtime. See Session Handoff Log entry for session 25 for full context.
 
 ---
 
 ## Session Handoff Log
+
+### 2026-03-08 — PM (session 25 — automate performance investigation)
+**Role taken:** Product Manager — `automate` command performance triage and task delegation
+**Problem statement:** The `automate` command takes upwards of 10 minutes to complete 10 steps, which is unacceptable for a CLI tool. Root cause investigation performed by reading `buffet_bot/automate.py`, `buffet_bot/cmd_account.py`, `buffet_bot/analysis.py`, `buffet_bot/data.py`, and `buffet_bot/globals.py`.
+
+**Root causes identified:**
+1. `scan_stocks()` uses `max_workers=2` in its `ThreadPoolExecutor` — too few workers for 20 tickers (Task #1)
+2. `get_buffett_metrics()` is called twice per ticker: once during `scan_stocks`, again during `analyze_stock` — no caching (Task #2)
+3. Two LLM calls in `_run_analysis()` run sequentially in a `for model in models_to_query:` loop — should be concurrent (Task #3)
+4. `_fetch_fred_data()` makes 3 HTTP calls on every `analyze_stock()` invocation — identical macro data fetched repeatedly (Task #4)
+5. No per-step or cumulative timing feedback — users cannot distinguish a slow LLM call from a hang (Task #5)
+6. LLM can call `analyze_stock()` on the same ticker multiple times — no session-scoped deduplication (Task #6)
+7. `ensure_ollama_running()` uses a fixed 0.5 s sleep polling loop instead of exponential backoff (Task #7)
+8. `messages` list grows unbounded across 10 steps — by step 10 the LLM processes 22 messages per call, adding 20–40% to inference time (Task #8)
+
+**Tasks created:** 8 tasks in the task tracker (IDs #1–#8) for the `buffet-bot-perf-engineer` agent
+**Files affected:** `buffet_bot/automate.py`, `buffet_bot/cmd_account.py`, `buffet_bot/analysis.py`, `buffet_bot/data.py`, `buffet_bot/globals.py`
+**Next:** Session 26 — `buffet-bot-perf-engineer` should work through tasks #1–#8 in task ID order. Tasks #2, #4, and #6 are pure caching additions with no risk to existing tests. Task #3 (concurrent LLM calls) has the highest performance impact and should be prioritized after the safe caching tasks. Task #8 (message trimming) should be implemented last as it changes agent behavior.
+
+---
 
 ### 2026-03-08 — Software Engineer (session 23 — v0.8.0 options-income CLI)
 **Role taken:** Software Engineer [ENG] — v0.8.0 options-income CLI commands + DB layer

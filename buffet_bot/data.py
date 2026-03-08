@@ -4,7 +4,7 @@ import requests
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import yfinance as yf
 import ollama
@@ -242,7 +242,7 @@ def _fetch_fred_data() -> dict:
 def _get_earnings_date(ticker: str) -> dict | None:
     """Check Nasdaq earnings calendar for the next 7 days. Returns dict or None."""
     for days_ahead in range(8):
-        date_str = (datetime.utcnow() + timedelta(days=days_ahead)).strftime('%Y-%m-%d')
+        date_str = (datetime.now(timezone.utc) + timedelta(days=days_ahead)).strftime('%Y-%m-%d')
         try:
             r = requests.get(
                 "https://api.nasdaq.com/api/calendar/earnings",
