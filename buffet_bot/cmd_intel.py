@@ -32,7 +32,12 @@ from buffet_bot.crypto import (
 )
 from buffet_bot.volatile import scan_volatile, display_volatile_table, VOLATILE_UNIVERSE
 from buffet_bot.edge import compute_edge_score, DEFAULT_WEIGHTS
-from buffet_bot.db import log_edge_scan
+from buffet_bot.db import log_edge_scan, log_options_position, get_options_positions
+from buffet_bot.options_engine import (
+    screen_covered_calls,
+    find_optimal_csp,
+    check_rolls_needed,
+)
 
 
 @click.command()
@@ -584,4 +589,423 @@ def edge_scan(preset, tickers, min_edge, top, weights, output_json, save, use_ll
     console.print(
         f'[dim]{len(results)} scored  |  {len(passing)} passed min-edge {min_edge}  |  '
         f'{"saved to DB" if save else "not saved"}[/dim]{llm_note}'
+    )
+
+
+# ── Options Income Group ───────────────────────────────────────────────────────
+
+
+def _build_candidates(preset: str, tickers: tuple) -> list[str]:
+    """Resolve a ticker list from --universe preset or --tickers override."""
+    if tickers:
+        return [t.upper() for t in tickers]
+    if preset == 'watchlist':
+        from buffet_bot.db import get_watchlist
+        return [row['ticker'] for row in get_watchlist()]
+    return list(_EDGE_UNIVERSES.get(preset, []))
+
+
+def _contract_table(results: list[dict], title: str, strategy: str) -> Table:
+    """Build a Rich table for covered-call or cash-put results."""
+    is_put = strategy == 'CSP'
+    tbl = Table(title=title, box=box.ROUNDED, header_style='bold bright_yellow', show_lines=False)
+    tbl.add_column('#',           justify='right',  style='dim',           no_wrap=True)
+    tbl.add_column('Ticker',      justify='left',   style='bold',          no_wrap=True)
+    tbl.add_column('Expiry',      justify='left',   style='bright_white',  no_wrap=True)
+    tbl.add_column('Strike',      justify='right',  style='bright_white',  no_wrap=True)
+    tbl.add_column('Mid',         justify='right',  style='bright_yellow', no_wrap=True)
+    tbl.add_column('Ann Yield',   justify='right',  style='bold',          no_wrap=True)
+    if is_put:
+        tbl.add_column('Cash Req',    justify='right',  style='bright_cyan',   no_wrap=True)
+    tbl.add_column('DTE',         justify='right',  style='bright_cyan',   no_wrap=True)
+    tbl.add_column('Δ est',       justify='right',  style='dim',           no_wrap=True)
+    tbl.add_column('IV',          justify='right',  style='dim',           no_wrap=True)
+    tbl.add_column('OI',          justify='right',  style='dim',           no_wrap=True)
+
+    for i, r in enumerate(results, start=1):
+        yld = r.get('annual_yield', 0)
+        yld_color = 'bright_green' if yld >= 0.15 else ('bright_yellow' if yld >= 0.08 else 'bright_red')
+        iv_val = r.get('iv', 0)
+        row = [
+            str(i),
+            r['ticker'],
+            r.get('expiry', ''),
+            f"${r.get('strike', 0):.2f}",
+            f"${r.get('mid', 0):.2f}",
+            f'[{yld_color}]{yld:.1%}[/{yld_color}]',
+        ]
+        if is_put:
+            row.append(f"${r.get('cash_required', 0):,.0f}")
+        row += [
+            str(r.get('dte', 0)),
+            f"{r.get('delta_est', 0):.2f}",
+            f"{iv_val:.1%}" if iv_val else '—',
+            f"{r.get('oi', 0):,}",
+        ]
+        tbl.add_row(*row)
+    return tbl
+
+
+@click.group('options-income')
+def options_income():
+    """Options income strategies: covered calls, cash-secured puts, roll check, dashboard."""
+    pass
+
+
+@options_income.command('covered-calls')
+@click.option('--universe', 'preset', default='buffett', show_default=True,
+              type=click.Choice(list(_EDGE_UNIVERSES.keys()) + ['watchlist']),
+              help='Ticker universe to screen.')
+@click.option('--tickers', multiple=True, metavar='TICKER',
+              help='Override universe with explicit tickers (repeatable).')
+@click.option('--delta', default=0.30, show_default=True, type=float,
+              help='Target delta for call strikes (0.10–0.40).')
+@click.option('--min-dte', default=21, show_default=True, type=int,
+              help='Minimum days to expiration.')
+@click.option('--max-dte', default=45, show_default=True, type=int,
+              help='Maximum days to expiration.')
+@click.option('--min-yield', default=0.08, show_default=True, type=float,
+              help='Minimum annualized yield to include (e.g. 0.08 = 8%).')
+@click.option('--top', default=10, show_default=True, type=int,
+              help='Maximum results to display.')
+@click.option('--save', 'do_save', is_flag=True, default=False,
+              help='Log results to options_positions table for tracking.')
+def covered_calls(preset, tickers, delta, min_dte, max_dte, min_yield, top, do_save):
+    """Screen tickers for covered call opportunities: buffet-bot options-income covered-calls"""
+    candidates = _build_candidates(preset, tickers)
+    if not candidates:
+        console.print('[red]No tickers to screen.[/red]')
+        return
+
+    label = f'custom ({len(candidates)})' if tickers else preset
+    console.print(Panel(
+        f'Universe: [bold bright_yellow]{label}[/bold bright_yellow]  |  '
+        f'Tickers: [bold]{len(candidates)}[/bold]  |  '
+        f'Target Δ: [bold]{delta:.2f}[/bold]  |  '
+        f'DTE: [bold]{min_dte}–{max_dte}[/bold]  |  '
+        f'Min yield: [bold bright_yellow]{min_yield:.0%}[/bold bright_yellow]',
+        title='[bold bright_yellow]Covered Call Screener[/bold bright_yellow]',
+        border_style='bright_yellow',
+    ))
+
+    with console.status('[bright_yellow]Scanning options chains...[/bright_yellow]', spinner='dots'):
+        results = screen_covered_calls(
+            candidates, target_delta=delta,
+            min_dte=min_dte, max_dte=max_dte,
+            min_annualized_yield=min_yield,
+        )
+
+    results = results[:top]
+    if not results:
+        console.print(
+            f'[yellow]No covered call opportunities found for {label}. '
+            f'Try lowering --min-yield or broadening --universe.[/yellow]'
+        )
+        return
+
+    console.print(_contract_table(results, f'Covered Calls — {label}', 'CC'))
+
+    if do_save:
+        saved = 0
+        for r in results:
+            row_id = log_options_position(
+                r['ticker'], 'COVERED_CALL', 'CALL',
+                r['expiry'], r['strike'], r['mid'],
+            )
+            if row_id:
+                saved += 1
+        console.print(f'[dim]{saved} position(s) logged to options_positions table.[/dim]')
+
+    console.print(
+        f'[dim]{len(results)} opportunities  |  '
+        f'{"tracked in DB" if do_save else "use --save to track"}  |  '
+        f'--execute available in live mode only[/dim]'
+    )
+
+
+@options_income.command('cash-puts')
+@click.option('--universe', 'preset', default='buffett', show_default=True,
+              type=click.Choice(list(_EDGE_UNIVERSES.keys()) + ['watchlist']),
+              help='Ticker universe to screen.')
+@click.option('--tickers', multiple=True, metavar='TICKER',
+              help='Override universe with explicit tickers (repeatable).')
+@click.option('--min-edge', default=65.0, show_default=True, type=float,
+              help='Minimum edge score to pass the pre-filter (0–100).')
+@click.option('--delta', default=0.20, show_default=True, type=float,
+              help='Target delta for put strikes (0.10–0.40).')
+@click.option('--max-cash', default=50_000.0, show_default=True, type=float,
+              help='Max cash collateral per contract (strike × 100).')
+@click.option('--min-yield', default=0.06, show_default=True, type=float,
+              help='Minimum annualized yield (e.g. 0.06 = 6%).')
+@click.option('--top', default=10, show_default=True, type=int,
+              help='Maximum results to display.')
+@click.option('--save', 'do_save', is_flag=True, default=False,
+              help='Log results to options_positions table for tracking.')
+def cash_puts(preset, tickers, min_edge, delta, max_cash, min_yield, top, do_save):
+    """Screen for cash-secured put opportunities on high-conviction tickers:
+    buffet-bot options-income cash-puts --min-edge 70"""
+    candidates = _build_candidates(preset, tickers)
+    if not candidates:
+        console.print('[red]No tickers to screen.[/red]')
+        return
+
+    label = f'custom ({len(candidates)})' if tickers else preset
+    console.print(Panel(
+        f'Universe: [bold bright_yellow]{label}[/bold bright_yellow]  |  '
+        f'Min edge: [bold bright_cyan]{min_edge}[/bold bright_cyan]  |  '
+        f'Target Δ: [bold]{delta:.2f}[/bold]  |  '
+        f'Max cash: [bold]${max_cash:,.0f}[/bold]  |  '
+        f'Min yield: [bold bright_yellow]{min_yield:.0%}[/bold bright_yellow]',
+        title='[bold bright_yellow]Cash-Secured Put Screener[/bold bright_yellow]',
+        border_style='bright_yellow',
+    ))
+
+    # Edge score pre-filter
+    with console.status(f'[dim]Filtering {len(candidates)} tickers by edge score...[/dim]', spinner='dots'):
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            edge_futures = {pool.submit(compute_edge_score, t): t for t in candidates}
+            qualified: list[str] = []
+            for fut in as_completed(edge_futures):
+                try:
+                    r = fut.result()
+                    if r.get('edge_score', 0) >= min_edge:
+                        qualified.append(r['ticker'])
+                except Exception:
+                    pass
+
+    if not qualified:
+        console.print(
+            f'[yellow]No tickers passed the edge score filter (>= {min_edge}). '
+            f'Try lowering --min-edge.[/yellow]'
+        )
+        return
+
+    console.print(f'[dim]{len(qualified)}/{len(candidates)} passed edge filter: {", ".join(qualified)}[/dim]')
+
+    # Screen CSPs concurrently
+    csp_min_dte, csp_max_dte = 21, 45
+    results: list[dict] = []
+    with console.status('[bright_yellow]Scanning options chains...[/bright_yellow]', spinner='dots'):
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            from buffet_bot.data import get_realtime_data as _rtd
+            future_map = {}
+            for t in qualified:
+                live = _rtd(t)
+                price = live.get('price', 0)
+                if price:
+                    future_map[pool.submit(
+                        find_optimal_csp, t, price, delta, csp_min_dte, csp_max_dte,
+                        max_cash, min_yield,
+                    )] = t
+
+            for fut in as_completed(future_map):
+                try:
+                    r = fut.result()
+                    if r:
+                        results.append(r)
+                except Exception:
+                    pass
+
+    results.sort(key=lambda r: r.get('annual_yield', 0), reverse=True)
+    results = results[:top]
+
+    if not results:
+        console.print(
+            f'[yellow]No cash-secured put opportunities found. '
+            f'Try lowering --min-yield or --min-edge.[/yellow]'
+        )
+        return
+
+    console.print(_contract_table(results, f'Cash-Secured Puts — {label}', 'CSP'))
+
+    if do_save:
+        saved = 0
+        for r in results:
+            row_id = log_options_position(
+                r['ticker'], 'CASH_SECURED_PUT', 'PUT',
+                r['expiry'], r['strike'], r['mid'],
+            )
+            if row_id:
+                saved += 1
+        console.print(f'[dim]{saved} position(s) logged to options_positions table.[/dim]')
+
+    console.print(
+        f'[dim]{len(results)} opportunities  |  '
+        f'{"tracked in DB" if do_save else "use --save to track"}  |  '
+        f'--execute available in live mode only[/dim]'
+    )
+
+
+@options_income.command('dashboard')
+@click.option('--all', 'show_all', is_flag=True, default=False,
+              help='Include closed positions in addition to open ones.')
+def options_dashboard(show_all):
+    """Open options positions + 12-month realized income chart:
+    buffet-bot options-income dashboard"""
+    import plotext as _plt
+
+    status_filter = 'ALL' if show_all else 'OPEN'
+    positions = get_options_positions(status=status_filter)
+
+    console.print(Panel(
+        f'Showing [bold]{"all" if show_all else "open"}[/bold] positions  |  '
+        f'Total: [bold]{len(positions)}[/bold]',
+        title='[bold bright_yellow]Options Income Dashboard[/bold bright_yellow]',
+        border_style='bright_yellow',
+    ))
+
+    if not positions:
+        console.print(
+            '[yellow]No options positions found. '
+            'Use [bright_cyan]options-income covered-calls --save[/bright_cyan] '
+            'or [bright_cyan]options-income cash-puts --save[/bright_cyan] to track positions.[/yellow]'
+        )
+        return
+
+    # Positions table
+    tbl = Table(
+        title='Options Positions', box=box.ROUNDED,
+        header_style='bold bright_yellow', show_lines=False,
+    )
+    tbl.add_column('#',          justify='right',  style='dim',            no_wrap=True)
+    tbl.add_column('Ticker',     justify='left',   style='bold',           no_wrap=True)
+    tbl.add_column('Strategy',   justify='left',   style='bright_yellow',  no_wrap=True)
+    tbl.add_column('Type',       justify='left',   style='dim',            no_wrap=True)
+    tbl.add_column('Strike',     justify='right',  style='bright_white',   no_wrap=True)
+    tbl.add_column('Expiry',     justify='left',   style='bright_white',   no_wrap=True)
+    tbl.add_column('DTE',        justify='right',  style='bright_cyan',    no_wrap=True)
+    tbl.add_column('Premium',    justify='right',  style='bright_yellow',  no_wrap=True)
+    tbl.add_column('Qty',        justify='right',  style='dim',            no_wrap=True)
+    tbl.add_column('P&L',        justify='right',  style='bold',           no_wrap=True)
+    tbl.add_column('Status',     justify='left',   style='dim',            no_wrap=True)
+
+    from datetime import date as _date
+    today = _date.today()
+    for i, p in enumerate(positions, start=1):
+        try:
+            exp = _date.fromisoformat(p['expiry'])
+            dte = (exp - today).days
+            dte_str = str(dte) if dte >= 0 else '[red]expired[/red]'
+        except Exception:
+            dte_str = '—'
+
+        pnl = p.get('pnl', 0)
+        pnl_color = 'bright_green' if pnl > 0 else ('bright_red' if pnl < 0 else 'dim')
+        pnl_str = f'[{pnl_color}]${pnl:+,.2f}[/{pnl_color}]' if p['status'] == 'CLOSED' else '—'
+
+        status_color = 'bright_green' if p['status'] == 'OPEN' else 'dim'
+        tbl.add_row(
+            str(i),
+            p['ticker'],
+            p['strategy'],
+            p['option_type'],
+            f"${p['strike']:.2f}",
+            p['expiry'],
+            dte_str,
+            f"${p['premium_received']:.2f}",
+            str(p['contracts']),
+            pnl_str,
+            f'[{status_color}]{p["status"]}[/{status_color}]',
+        )
+
+    console.print(tbl)
+
+    # 12-month income bar chart from closed positions
+    closed = [p for p in positions if p['status'] == 'CLOSED' and p.get('pnl', 0) != 0]
+    if closed:
+        monthly: dict[str, float] = {}
+        for p in closed:
+            try:
+                month_key = p['closed_at'][:7]  # YYYY-MM
+                monthly[month_key] = monthly.get(month_key, 0.0) + p.get('pnl', 0)
+            except Exception:
+                pass
+
+        if monthly:
+            sorted_months = sorted(monthly.keys())[-12:]
+            labels = [m[5:] for m in sorted_months]   # MM only
+            values = [monthly[m] for m in sorted_months]
+            total_income = sum(values)
+
+            _plt.clf()
+            _plt.bar(labels, values, color='yellow')
+            _plt.title('Realized Income by Month (last 12 months)')
+            _plt.xlabel('Month')
+            _plt.ylabel('P&L ($)')
+            _plt.show()
+            console.print(
+                f'[bold bright_yellow]Total realized income:[/bold bright_yellow] '
+                f'[bold]${total_income:+,.2f}[/bold]'
+            )
+
+
+@options_income.command('roll-check')
+@click.option('--dte-threshold', default=7, show_default=True, type=int,
+              help='Flag positions with DTE at or below this value.')
+def roll_check(dte_threshold):
+    """Flag open options positions approaching expiration:
+    buffet-bot options-income roll-check"""
+    positions = get_options_positions(status='OPEN')
+    if not positions:
+        console.print('[yellow]No open options positions to check.[/yellow]')
+        return
+
+    console.print(Panel(
+        f'Open positions: [bold]{len(positions)}[/bold]  |  '
+        f'DTE threshold: [bold bright_red]{dte_threshold}[/bold bright_red]',
+        title='[bold bright_red]Options Roll Check[/bold bright_red]',
+        border_style='bright_red',
+    ))
+
+    with console.status('[dim]Checking positions...[/dim]', spinner='dots'):
+        flagged = check_rolls_needed(positions, dte_threshold=dte_threshold)
+
+    if not flagged:
+        console.print(
+            f'[bright_green]All positions have more than {dte_threshold} DTE. '
+            f'No rolls needed.[/bright_green]'
+        )
+        return
+
+    tbl = Table(
+        title=f'{len(flagged)} Position(s) Needing Attention',
+        box=box.ROUNDED, header_style='bold bright_red', show_lines=False,
+    )
+    tbl.add_column('Ticker',      justify='left',  style='bold',         no_wrap=True)
+    tbl.add_column('Strategy',    justify='left',  style='bright_yellow', no_wrap=True)
+    tbl.add_column('Strike',      justify='right', style='bright_white',  no_wrap=True)
+    tbl.add_column('Expiry',      justify='left',  style='bright_white',  no_wrap=True)
+    tbl.add_column('DTE',         justify='right', style='bright_red',    no_wrap=True)
+    tbl.add_column('Action',      justify='left',  style='bold',          no_wrap=True)
+    tbl.add_column('New Strike',  justify='right', style='bright_cyan',   no_wrap=True)
+    tbl.add_column('ATR',         justify='right', style='dim',           no_wrap=True)
+
+    action_colors = {
+        'ROLL_UP':    'bright_green',
+        'ROLL_DOWN':  'bright_yellow',
+        'LET_EXPIRE': 'bright_cyan',
+        'CLOSE':      'bright_red',
+    }
+    for item in flagged:
+        pos = item['position']
+        action = item['action']
+        color = action_colors.get(action, 'white')
+        new_strike = item.get('new_strike')
+        atr = item.get('atr')
+        tbl.add_row(
+            pos.get('ticker', ''),
+            pos.get('strategy', ''),
+            f"${float(pos.get('strike', 0)):.2f}",
+            pos.get('expiry', ''),
+            str(item['dte_remaining']),
+            f'[{color}]{action}[/{color}]',
+            f'${new_strike:.2f}' if new_strike else '—',
+            f'${atr:.2f}' if atr else '—',
+        )
+
+    console.print(tbl)
+    console.print(
+        '[dim]ROLL_UP/ROLL_DOWN: roll the position out in time with new strike  |  '
+        'LET_EXPIRE: collect full premium  |  '
+        'CLOSE: buy back to avoid assignment risk[/dim]'
     )

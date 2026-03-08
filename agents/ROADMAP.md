@@ -29,15 +29,61 @@
 | 19      | QA (v0.7.0 — edge.py + edge-scan + db edge helpers tests) | complete — 2026-03-06 |
 | 20      | QA + ENG async (yfinance crumb fix + automate tests + data coverage) | complete — 2026-03-06 |
 | 21      | ENG (v0.7.0 — LLM injection into edge-scan via --llm flag) | complete — 2026-03-08 |
-| **22 →**| **ENG (v0.7.0 — backtest --edge) OR ENG (v0.8.0 options_engine.py — ADR-014)** | **next** |
+| 22      | Architect (v0.8.0 — options_engine.py full implementation, ADR-016) | complete — 2026-03-08 |
+| 23      | ENG (v0.8.0 — options-income CLI + options_positions DB table) | complete — 2026-03-08 |
+| **24 →**| **QA (v0.8.0 — options_engine tests + options_positions DB tests + CLI tests)** | **next** |
 
-**Current milestone:** v0.5.0 SHIPPED. v0.6.0 complete. v0.7.0 Edge Score + LLM injection complete. 290 tests passing.
+**Current milestone:** v0.5.0 SHIPPED. v0.6.0 complete. v0.7.0 complete. v0.8.0 options-income CLI complete. 290 tests passing.
 **Do NOT take Security Auditor** until v1.0.0 milestone is explicitly started.
-**Session 22 focus:** ENG — implement `_run_edge_backtest()` + `backtest --edge` flag, OR begin `options_engine.py` (ADR-014).
+**Session 24 focus:** QA — tests for options_engine (Black-Scholes, annualized_yield, find_optimal_covered_call, find_optimal_csp), options_positions DB CRUD helpers, and CLI sub-commands via CliRunner.
 
 ---
 
 ## Session Handoff Log
+
+### 2026-03-08 — Software Engineer (session 23 — v0.8.0 options-income CLI)
+**Role taken:** Software Engineer [ENG] — v0.8.0 options-income CLI commands + DB layer
+**What was done:**
+- **`buffet_bot/db.py`**: `init_options_positions_table()` (creates `options_positions` table with ticker/status/expiry indexes); `log_options_position()` (INSERT new tracked position); `close_options_position()` (UPDATE to CLOSED, auto-computes P&L = (received - paid) × contracts × 100); `get_options_positions(status)` (SELECT by OPEN/CLOSED/ALL); wired into `init_db()`
+- **`buffet_bot/cmd_intel.py`**: `options_income` Click group with 4 sub-commands:
+  - `covered-calls`: `screen_covered_calls()` fan-out, Rich table (Strike/Mid/AnnYield/DTE/Delta/IV/OI), `--save` logs to DB
+  - `cash-puts`: edge score pre-filter (concurrent `compute_edge_score()` fan-out, threshold `--min-edge`), then `find_optimal_csp()` per qualifying ticker, `--save` logs to DB
+  - `dashboard`: positions table from `options_positions`, plotext 12-month realized income bar chart for closed positions, `--all` flag for closed history
+  - `roll-check`: `check_rolls_needed()` from `options_engine.py`, color-coded action table (ROLL_UP/ROLL_DOWN/LET_EXPIRE/CLOSE)
+- **`buffet_bot/main.py`**: imported + registered `options_income` group
+- **290 tests pass** — no regressions
+
+**Next:** QA session 24 — tests for Black-Scholes math, annualized_yield, find_optimal_covered_call/csp (mocked yfinance), options_positions DB CRUD, and `options-income` CLI sub-commands via CliRunner
+
+---
+
+### 2026-03-08 — Architect (session 22 — v0.8.0 options_engine.py)
+**Role taken:** Architect [ARCH] — v0.8.0 Options Income Engine design + implementation
+**What was done:**
+- **`buffet_bot/options_engine.py`** (new module, ~700 lines): Full options income engine with 14 public functions:
+  - **Black-Scholes pricing**: `black_scholes_price()` -- closed-form European option pricing using `math.erf` (stdlib only, no scipy/py_vollib)
+  - **Greeks**: `compute_greeks()` -- delta, gamma, theta, vega, rho for calls and puts
+  - **IV estimation**: `estimate_iv()` -- Newton-Raphson implied volatility solver (100 iterations, 1e-5 tolerance)
+  - **IV surface**: `build_iv_surface()` -- full vol surface across expiries with ATM IV and skew calculation
+  - **Chain fetching**: `fetch_options_chain()` -- yfinance-based with DTE filtering, `_yf_semaphore` respected
+  - **Covered call screening**: `find_optimal_covered_call()` + `screen_covered_calls()` (concurrent ThreadPoolExecutor)
+  - **Cash-secured put screening**: `find_optimal_csp()` with cash collateral validation
+  - **Protective put hedging**: `screen_protective_puts()` with annualized cost budget filter
+  - **Iron condor setup**: `find_iron_condor()` -- 4-leg construction with net credit, max loss, breakeven calculations
+  - **Wheel strategy scoring**: `score_wheel_strategy()` -- composite 0-100 score (edge 30%, put yield 25%, call yield 25%, ATR 10%, liquidity 10%)
+  - **Roll check**: `check_rolls_needed()` -- flags positions at 7 DTE with ATR-based roll strike suggestions
+  - **LLM recommendation**: `get_options_recommendation()` -- Ollama-powered strategy selection with contract finding
+  - **Yield**: `annualized_yield()` -- (premium/strike) * (365/dte)
+  - **Liquidity filtering**: `_filter_liquid()` -- OI >= 100, bid >= 0.05
+- **Delta proxy**: Two-tier approach -- uses strike/price ratio as proxy when yfinance IV is unavailable; falls back to full Black-Scholes delta when IV exists
+- **No new dependencies**: All math uses stdlib `math` + `numpy` (already required); no py_vollib, no scipy
+- **Pattern compliance**: Returns data structures (no Rich output), `None` on failure, type hints on all public functions, `_yf_semaphore` for all yfinance calls
+- **`agents/DECISIONS.md`**: ADR-016 written -- documents Black-Scholes vs binomial tree decision, IV calculation approach, yfinance data source choice, delta proxy rationale, strategy selection logic
+- **`agents/ROADMAP.md`**: session 22 row added, v0.8.0 ARCH item marked `[x]`, next session set to ENG for command wiring
+
+**Next:** ENG session 23 -- wire `options-income covered-calls`, `options-income cash-puts`, `options-income dashboard`, `options-income roll-check` sub-commands in `cmd_intel.py`; add `options_positions` table + helpers to `db.py`; register in `main.py`
+
+---
 
 ### 2026-03-08 — Software Engineer (session 21 — v0.7.0 LLM injection into edge-scan)
 **Role taken:** Software Engineer [ENG] — v0.7.0 LLM conviction score injection
@@ -438,12 +484,12 @@
 ## v0.8.0 — Options Income Engine
 
 ### Options Engine
-- [ ] [ARCH] `buffet_bot/options_engine.py`: `_fetch_options_chain()`, `_find_optimal_covered_call()` (0.30 delta, 21–45 DTE), `_find_optimal_csp()` (0.20 delta), `_annualized_yield()`
-- [ ] [ENG] `db.py`: `options_positions` table (contract tracking + roll history)
-- [ ] [ENG] `options-income covered-calls` sub-command in `cmd_intel.py`; yfinance options chain
-- [ ] [ENG] `options-income cash-puts`: filters watchlist tickers with EDGE_SCORE > 65; cash requirement validation
-- [ ] [ENG] `options-income dashboard`: open positions, DTE, P&L, 12-month income bar chart (plotext)
-- [ ] [ENG] `options-income roll-check`: 7-DTE flag; uses `_get_atr()` from `risk.py` for risk assessment
+- [x] [ARCH] `buffet_bot/options_engine.py`: `fetch_options_chain()`, `find_optimal_covered_call()` (0.30 delta, 21-45 DTE), `find_optimal_csp()` (0.20 delta), `annualized_yield()`, `black_scholes_price()`, `compute_greeks()`, `estimate_iv()`, `build_iv_surface()`, `find_iron_condor()`, `score_wheel_strategy()`, `screen_covered_calls()`, `screen_protective_puts()`, `check_rolls_needed()`, `get_options_recommendation()` -- ADR-016 written; complete 2026-03-08 (session 22)
+- [x] [ENG] `db.py`: `options_positions` table + `log_options_position()`, `close_options_position()`, `get_options_positions()` — complete 2026-03-08 (session 23)
+- [x] [ENG] `options-income covered-calls` sub-command in `cmd_intel.py`; yfinance options chain — complete 2026-03-08 (session 23)
+- [x] [ENG] `options-income cash-puts`: edge score pre-filter (`--min-edge`), concurrent CSP screening, cash requirement validation — complete 2026-03-08 (session 23)
+- [x] [ENG] `options-income dashboard`: open positions table, DTE, P&L, 12-month income bar chart (plotext), `--all` flag — complete 2026-03-08 (session 23)
+- [x] [ENG] `options-income roll-check`: DTE threshold flag, `check_rolls_needed()` via ATR from `risk.py`, color-coded action table — complete 2026-03-08 (session 23)
 - [ ] [ENG] `--execute` for live accounts only (Alpaca options API is live-only; gated behind LIVE_MODE)
 
 ### QA
@@ -509,12 +555,12 @@
 
 | Field | Value |
 |-------|-------|
-| **Next session role** | ENG (v0.7.0 backtest --edge) OR ENG (v0.8.0 options_engine.py) |
-| **Suggested focus (ENG-A)** | Implement `_run_edge_backtest()` in `backtest.py` + `backtest --edge` flag (completes v0.7.0) |
-| **Suggested focus (ENG-B)** | Begin `options_engine.py` (v0.8.0, ADR-014): `_fetch_options_chain()`, `_find_optimal_covered_call()`, `_find_optimal_csp()` |
+| **Next session role** | QA (v0.8.0 — options engine + DB + CLI tests) |
+| **Suggested focus** | `tests/test_options_engine.py`: Black-Scholes price/greeks, annualized_yield, find_optimal_covered_call/csp (mock yfinance), check_rolls_needed; `tests/test_db.py`: options_positions CRUD; `tests/test_cli.py`: options-income sub-commands via CliRunner |
+| **Also open** | v0.7.0 `backtest --edge` + lookahead bias QA (lower priority, can defer to v0.8.0 QA wrap-up) |
 | **Do NOT take** | Security Auditor (gated to v1.0.0 pre-release) |
-| **Reminder** | v0.7.0 remaining open: `backtest --edge` + lookahead bias QA. v0.8.0 unblocked (ADR-014 written). |
-| **Last updated** | 2026-03-08 by ENG Agent (session 21) |
+| **Reminder** | `options_engine.py` (14 functions), `options_positions` DB table, and all 4 `options-income` sub-commands are complete. Only `--execute` (live-only) remains. |
+| **Last updated** | 2026-03-08 by ENG Agent (session 23) |
 
 ---
 

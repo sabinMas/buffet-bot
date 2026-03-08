@@ -167,6 +167,132 @@ def get_sweep_history(limit: int = 20) -> list[dict]:
         return []
 
 
+def init_options_positions_table() -> None:
+    """Create options_positions table if it doesn't exist."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS options_positions (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                opened_at        TEXT    NOT NULL,
+                ticker           TEXT    NOT NULL,
+                strategy         TEXT    NOT NULL,
+                option_type      TEXT    NOT NULL,
+                expiry           TEXT    NOT NULL,
+                strike           REAL    NOT NULL,
+                premium_received REAL    NOT NULL DEFAULT 0.0,
+                contracts        INTEGER NOT NULL DEFAULT 1,
+                status           TEXT    NOT NULL DEFAULT 'OPEN',
+                closed_at        TEXT    NOT NULL DEFAULT '',
+                closed_premium   REAL    NOT NULL DEFAULT 0.0,
+                pnl              REAL    NOT NULL DEFAULT 0.0,
+                notes            TEXT    NOT NULL DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS idx_options_positions_ticker
+                ON options_positions(ticker);
+            CREATE INDEX IF NOT EXISTS idx_options_positions_status
+                ON options_positions(status);
+            CREATE INDEX IF NOT EXISTS idx_options_positions_expiry
+                ON options_positions(expiry);
+        """)
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+def log_options_position(ticker: str, strategy: str, option_type: str,
+                         expiry: str, strike: float, premium_received: float,
+                         contracts: int = 1, notes: str = '') -> int:
+    """Insert an options_positions row. Returns new row id or 0 on error."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.execute(
+            """INSERT INTO options_positions
+               (opened_at, ticker, strategy, option_type, expiry, strike,
+                premium_received, contracts, status, notes)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (
+                datetime.now(timezone.utc).isoformat(),
+                ticker.upper(),
+                strategy.upper(),
+                option_type.upper(),
+                expiry,
+                round(float(strike), 2),
+                round(float(premium_received), 4),
+                int(contracts),
+                'OPEN',
+                str(notes)[:500],
+            ),
+        )
+        row_id = cur.lastrowid
+        conn.commit()
+        conn.close()
+        return row_id or 0
+    except Exception:
+        return 0
+
+
+def close_options_position(position_id: int, closed_premium: float,
+                           notes: str = '') -> None:
+    """Mark an options_positions row CLOSED and compute P&L."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        pos = conn.execute(
+            "SELECT premium_received, contracts FROM options_positions WHERE id = ?",
+            (int(position_id),),
+        ).fetchone()
+        if not pos:
+            conn.close()
+            return
+        premium_received, contracts = pos
+        pnl = round((premium_received - float(closed_premium)) * int(contracts) * 100, 2)
+        conn.execute(
+            """UPDATE options_positions
+               SET status='CLOSED', closed_at=?, closed_premium=?, pnl=?, notes=?
+               WHERE id=?""",
+            (
+                datetime.now(timezone.utc).isoformat(),
+                round(float(closed_premium), 4),
+                pnl,
+                str(notes)[:500],
+                int(position_id),
+            ),
+        )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+def get_options_positions(status: str = 'OPEN') -> list[dict]:
+    """Return options_positions rows filtered by status ('OPEN', 'CLOSED', 'ALL')."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        if status.upper() == 'ALL':
+            rows = conn.execute(
+                """SELECT id, opened_at, ticker, strategy, option_type, expiry, strike,
+                          premium_received, contracts, status, closed_at, closed_premium,
+                          pnl, notes
+                   FROM options_positions ORDER BY opened_at DESC""",
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT id, opened_at, ticker, strategy, option_type, expiry, strike,
+                          premium_received, contracts, status, closed_at, closed_premium,
+                          pnl, notes
+                   FROM options_positions WHERE status = ? ORDER BY opened_at DESC""",
+                (status.upper(),),
+            ).fetchall()
+        conn.close()
+        cols = ['id', 'opened_at', 'ticker', 'strategy', 'option_type', 'expiry',
+                'strike', 'premium_received', 'contracts', 'status', 'closed_at',
+                'closed_premium', 'pnl', 'notes']
+        return [dict(zip(cols, r)) for r in rows]
+    except Exception:
+        return []
+
+
 def init_db():
     """Create recommendation/outcome tables if they don't exist."""
     conn = sqlite3.connect(DB_PATH)
@@ -224,6 +350,7 @@ def init_db():
     init_live_audit_table()
     init_compound_tables()
     init_edge_table()
+    init_options_positions_table()
 
 
 def init_edge_table() -> None:
