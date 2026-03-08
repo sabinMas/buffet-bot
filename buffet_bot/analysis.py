@@ -13,6 +13,7 @@ from buffet_bot.db import log_recommendation
 from buffet_bot.data import (
     get_buffett_metrics, get_analyst_consensus, get_tech_indicators,
     get_realtime_data, _fetch_fred_data, get_recent_news, analyze_news_sentiment,
+    _yf_semaphore,
 )
 from buffet_bot.backtest import get_multiframe_signals
 from buffet_bot.insiders import fetch_insider_transactions, insider_prompt_block
@@ -46,7 +47,8 @@ def _run_analysis(ticker, risk, primary_model, strategy='value'):
     import yfinance as yf
 
     def _hist_dl():
-        return yf.download(ticker, period='6mo', progress=False)['Close'].tail(30)
+        with _yf_semaphore:
+            return yf.download(ticker, period='6mo', progress=False)['Close'].tail(30)
 
     with ThreadPoolExecutor(max_workers=9) as ex:
         f_hist       = ex.submit(_hist_dl)

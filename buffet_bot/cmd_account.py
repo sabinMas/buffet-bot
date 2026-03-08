@@ -240,7 +240,7 @@ def _build_automate_tools(execute: bool, budget: float, primary_model: str, risk
     def scan_stocks(top=5):
         tickers = DEFAULT_SCAN_TICKERS
         results = {}
-        with ThreadPoolExecutor(max_workers=min(len(tickers), 8)) as pool:
+        with ThreadPoolExecutor(max_workers=min(len(tickers), 2)) as pool:
             futures = {pool.submit(get_buffett_metrics, t): t for t in tickers}
             for fut in as_completed(futures):
                 t = futures[fut]
@@ -253,7 +253,10 @@ def _build_automate_tools(execute: bool, budget: float, primary_model: str, risk
 
     def analyze_stock(ticker, risk=risk, strategy=strategy):
         ticker = ticker.upper()
-        data = _run_analysis(ticker, risk, primary_model, strategy)
+        try:
+            data = _run_analysis(ticker, risk, primary_model, strategy)
+        except Exception as e:
+            return {"error": f"Analysis failed for {ticker}: {e}", "consensus": "HOLD"}
         realtime = data.get('realtime') or {}
         buffett  = data.get('buffett')  or {}
         best     = data.get('best_buy_resp') or {}

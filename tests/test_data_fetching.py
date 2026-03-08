@@ -396,3 +396,179 @@ class TestGetRealtimeData:
 
         assert isinstance(result, dict)
         assert result == {}
+
+
+# ── get_analyst_consensus ─────────────────────────────────────────────────────
+
+def _mock_analyst_ticker(
+    target_mean=200.0, current=180.0, target_low=160.0, target_high=240.0,
+    num_analysts=12, rating_mean=2.1, rating_key='buy',
+    upgrades=None,
+):
+    """Build a minimal mock yfinance Ticker for analyst consensus tests."""
+    import pandas as pd
+
+    info = {
+        'targetMeanPrice':           target_mean,
+        'targetLowPrice':            target_low,
+        'targetHighPrice':           target_high,
+        'currentPrice':              current,
+        'numberOfAnalystOpinions':   num_analysts,
+        'recommendationMean':        rating_mean,
+        'recommendationKey':         rating_key,
+    }
+
+    mock_ticker = MagicMock()
+    mock_ticker.info = info
+
+    if upgrades is None:
+        # Provide a small upgrades_downgrades DataFrame
+        mock_ticker.upgrades_downgrades = pd.DataFrame([
+            {'Firm': 'GS', 'FromGrade': 'Hold', 'ToGrade': 'Buy', 'Action': 'up'},
+        ])
+    else:
+        mock_ticker.upgrades_downgrades = upgrades
+
+    return mock_ticker
+
+
+class TestGetAnalystConsensus:
+    """Tests for get_analyst_consensus() — Wall Street ratings via yfinance."""
+
+    def test_returns_dict_with_all_fields(self):
+        from buffet_bot.data import get_analyst_consensus
+        mock_ticker = _mock_analyst_ticker()
+        with patch('buffet_bot.data.yf.Ticker', return_value=mock_ticker):
+            result = get_analyst_consensus('AAPL')
+        for key in ('rating_key', 'target_mean', 'upside_pct',
+                    'num_analysts', 'recent_changes'):
+            assert key in result, f"Missing key: {key}"
+
+    def test_computes_upside_pct_correctly(self):
+        """upside_pct = (target_mean - current) / current * 100, rounded to 1dp."""
+        from buffet_bot.data import get_analyst_consensus
+        mock_ticker = _mock_analyst_ticker(target_mean=220.0, current=200.0)
+        with patch('buffet_bot.data.yf.Ticker', return_value=mock_ticker):
+            result = get_analyst_consensus('AAPL')
+        assert abs(result['upside_pct'] - 10.0) < 0.1
+
+    def test_maps_rating_key_to_uppercase(self):
+        """'buy' recommendationKey → 'BUY' in result."""
+        from buffet_bot.data import get_analyst_consensus
+        mock_ticker = _mock_analyst_ticker(rating_key='buy')
+        with patch('buffet_bot.data.yf.Ticker', return_value=mock_ticker):
+            result = get_analyst_consensus('AAPL')
+        assert result['rating_key'] == 'BUY'
+
+    def test_maps_strong_buy_rating(self):
+        """'strong_buy' recommendationKey → 'STRONG BUY'."""
+        from buffet_bot.data import get_analyst_consensus
+        mock_ticker = _mock_analyst_ticker(rating_key='strong_buy')
+        with patch('buffet_bot.data.yf.Ticker', return_value=mock_ticker):
+            result = get_analyst_consensus('AAPL')
+        assert result['rating_key'] == 'STRONG BUY'
+
+    def test_returns_empty_dict_when_no_target_mean(self):
+        """Missing targetMeanPrice → returns {} early."""
+        from buffet_bot.data import get_analyst_consensus
+        mock_ticker = _mock_analyst_ticker(target_mean=None)
+        mock_ticker.info['targetMeanPrice'] = None
+        with patch('buffet_bot.data.yf.Ticker', return_value=mock_ticker):
+            result = get_analyst_consensus('AAPL')
+        assert result == {}
+
+    def test_returns_empty_dict_on_yfinance_exception(self):
+        """yf.Ticker() raising → returns {} without propagating."""
+        from buffet_bot.data import get_analyst_consensus
+        with patch('buffet_bot.data.yf.Ticker', side_effect=Exception("crumb error")):
+            result = get_analyst_consensus('AAPL')
+        assert result == {}
+
+    def test_includes_recent_upgrades_downgrades(self):
+        """upgrades_downgrades DataFrame → recent_changes list populated."""
+        from buffet_bot.data import get_analyst_consensus
+        mock_ticker = _mock_analyst_ticker()
+        with patch('buffet_bot.data.yf.Ticker', return_value=mock_ticker):
+            result = get_analyst_consensus('AAPL')
+        assert isinstance(result['recent_changes'], list)
+        assert len(result['recent_changes']) >= 1
+        assert result['recent_changes'][0]['firm'] == 'GS'
+
+    def test_handles_missing_upgrades_downgrades_gracefully(self):
+        """upgrades_downgrades raising → still returns main fields, recent_changes=[]."""
+        import pandas as pd
+        from buffet_bot.data import get_analyst_consensus
+        mock_ticker = _mock_analyst_ticker()
+        # Make upgrades_downgrades raise on access
+        type(mock_ticker).upgrades_downgrades = PropertyMock(
+            side_effect=Exception("no data")
+        )
+        with patch('buffet_bot.data.yf.Ticker', return_value=mock_ticker):
+            result = get_analyst_consensus('AAPL')
+        assert 'target_mean' in result
+        assert result['recent_changes'] == []
+
+    def test_num_analysts_as_int(self):
+        from buffet_bot.data import get_analyst_consensus
+        mock_ticker = _mock_analyst_ticker(num_analysts=15)
+        with patch('buffet_bot.data.yf.Ticker', return_value=mock_ticker):
+            result = get_analyst_consensus('AAPL')
+        assert result['num_analysts'] == 15
+        assert isinstance(result['num_analysts'], int)
+
+
+# ── get_tech_indicators ───────────────────────────────────────────────────────
+
+def _make_price_series(n=60, start=100.0, step=0.5):
+    """Return a simple ascending close-price DataFrame for RSI/MACD calculation."""
+    import pandas as pd
+    import numpy as np
+    dates = pd.date_range('2025-01-01', periods=n, freq='B')
+    prices = pd.Series(
+        [start + i * step for i in range(n)], index=dates, name='Close'
+    )
+    return pd.DataFrame({'Close': prices})
+
+
+class TestGetTechIndicators:
+    """Tests for get_tech_indicators() — RSI/MACD via yfinance download."""
+
+    def test_returns_rsi_and_macd_on_success(self):
+        """Happy path: valid price data → dict with 'rsi' and 'macd' keys."""
+        from buffet_bot.data import get_tech_indicators
+        df = _make_price_series(n=60)
+        with patch('buffet_bot.data.yf.download', return_value=df):
+            result = get_tech_indicators('AAPL')
+        assert 'rsi' in result
+        assert 'macd' in result
+
+    def test_rsi_is_float_between_0_and_100(self):
+        from buffet_bot.data import get_tech_indicators
+        df = _make_price_series(n=60)
+        with patch('buffet_bot.data.yf.download', return_value=df):
+            result = get_tech_indicators('AAPL')
+        assert isinstance(result['rsi'], float)
+        assert 0.0 <= result['rsi'] <= 100.0
+
+    def test_returns_empty_dict_on_empty_download(self):
+        """yf.download returning empty DataFrame → returns {}."""
+        import pandas as pd
+        from buffet_bot.data import get_tech_indicators
+        empty_df = pd.DataFrame()
+        with patch('buffet_bot.data.yf.download', return_value=empty_df):
+            result = get_tech_indicators('AAPL')
+        assert result == {}
+
+    def test_returns_empty_dict_on_yfinance_exception(self):
+        """yf.download raising → returns {} without propagating."""
+        from buffet_bot.data import get_tech_indicators
+        with patch('buffet_bot.data.yf.download', side_effect=Exception("crumb error")):
+            result = get_tech_indicators('AAPL')
+        assert isinstance(result, dict)
+
+    def test_macd_is_float(self):
+        from buffet_bot.data import get_tech_indicators
+        df = _make_price_series(n=60)
+        with patch('buffet_bot.data.yf.download', return_value=df):
+            result = get_tech_indicators('AAPL')
+        assert isinstance(result.get('macd'), float)

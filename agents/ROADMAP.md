@@ -27,15 +27,49 @@
 | 17      | ENG (v0.6.0 — compound command + automate --sweep) | complete — 2026-03-06 |
 | 18      | ENG (v0.7.0 — edge.py + edge-scan command, ADR-013) | complete — 2026-03-06 |
 | 19      | QA (v0.7.0 — edge.py + edge-scan + db edge helpers tests) | complete — 2026-03-06 |
-| **20 →**| **ENG (v0.7.0 — LLM injection into edge-scan) OR ENG (v0.8.0 options_engine.py — ADR-014)** | **next** |
+| 20      | QA + ENG async (yfinance crumb fix + automate tests + data coverage) | complete — 2026-03-06 |
+| **21 →**| **ENG (v0.7.0 — LLM injection into edge-scan) OR ENG (v0.8.0 options_engine.py — ADR-014)** | **next** |
 
-**Current milestone:** v0.5.0 SHIPPED. v0.6.0 Live Guard + Compounding Engine complete. v0.7.0 Edge Score Engine complete (edge.py, edge-scan command, 62 new tests — 248 total passing).
+**Current milestone:** v0.5.0 SHIPPED. v0.6.0 complete. v0.7.0 Edge Score complete. Automate crumb bug fixed. 290 tests passing.
 **Do NOT take Security Auditor** until v1.0.0 milestone is explicitly started.
-**Session 20 focus:** ENG — wire Ollama `llm_score` injection into `edge-scan` (call `qwen2.5:7b` per ticker to fill the 20% LLM weight), OR begin `options_engine.py` (ADR-014).
+**Session 21 focus:** ENG — wire Ollama `llm_score` injection into `edge-scan`, OR begin `options_engine.py` (ADR-014).
 
 ---
 
 ## Session Handoff Log
+
+### 2026-03-06 — QA + ENG async (session 20 — yfinance crumb fix + automate + data coverage)
+**Role taken:** QA Engineer [QA] — async with Architect token-reduction audit
+**What was done:**
+- **Root cause diagnosed:** yfinance crumb errors in `automate` caused by 4 unprotected call sites + `scan_stocks` using `max_workers=8` vs the correct `min(..., 2)`
+- **`buffet_bot/data.py`** — wrapped `get_analyst_consensus()` (yf.Ticker + upgrades_downgrades), `get_tech_indicators()` (yf.download), `get_realtime_data()` fallback (yf.Ticker.fast_info) with `_yf_semaphore`; added missing try/except to `get_tech_indicators` (was inconsistent with all other data fetchers)
+- **`buffet_bot/analysis.py`** — imported `_yf_semaphore`; wrapped `yf.download` inside `_hist_dl()` nested function
+- **`buffet_bot/cmd_account.py`** — `scan_stocks` max_workers 8 → 2; `analyze_stock` closure now catches `_run_analysis` exceptions returning `{"error": ..., "consensus": "HOLD"}`
+- **`tests/test_automate.py`** (new, 28 tests): `TestExtractJson` (6), `TestRunAgentLoop` (10), `TestAutomateCrumbResilience` (4), `TestAutomateCommand` (8) — full automate command coverage for the first time
+- **`tests/test_data_fetching.py`** (14 new tests): `TestGetAnalystConsensus` (9) + `TestGetTechIndicators` (5) — covered the two previously-zero-tested functions
+- **Total tests:** 276 → 290 passing (+14 from data tests, +28 from automate tests = +42 this session; 276 was the post-session-19 count)
+
+**Bug found and fixed:** `get_tech_indicators` lacked try/except — any yfinance error propagated uncaught (all other data fetchers return `{}` on error). Added wrapping try/except consistent with the rest of the module.
+
+**Async note:** Architect was simultaneously doing token-reduction audit (`agents/REFACTOR-PLAN.md`). No file conflicts — QA worked on `data.py`, `analysis.py`, `cmd_account.py` (crumb fixes only) and test files; Architect worked on audit documentation only.
+
+**Next:** ENG session 21 — wire Ollama llm_score into edge-scan, OR options_engine.py (ADR-014)
+
+---
+
+### 2026-03-06 — Architect (session 20 — token-reduction audit)
+**Role taken:** Architect [ARCH] — token-reduction refactor audit
+**What was done:**
+- **`agents/REFACTOR-PLAN.md`** (new): comprehensive token-reduction refactor plan covering all 24 files in `buffet_bot/`
+- Measured file sizes (`wc -l`), read top 6 largest files in full, identified cross-file duplication patterns
+- Key findings: 15+ unused imports in `globals.py` (monolith leftovers), `_COMPANY_DB` 390-line dict literal in `universe.py` (85% of potential savings), color-upgrade boilerplate copy-pasted 5x across 3 files, `db.py` connection pattern repeated 21x without context manager
+- 6-step execution plan ordered for safety: globals cleanup, display helper, color dedup, db context manager, universe JSON extraction, import merges
+- Estimated total savings: ~490 lines (~14,100 tokens), mostly from `universe.py` data extraction
+- No source files modified (audit and plan only)
+
+**Next:** ENG — execute REFACTOR-PLAN.md steps 1-6 (independently committable); then resume v0.7.0 LLM injection or v0.8.0 options engine
+
+---
 
 ### 2026-03-06 — QA (session 19 — v0.7.0 Edge Score Engine tests)
 **Role taken:** QA — v0.7.0 edge.py + edge-scan + db edge helpers

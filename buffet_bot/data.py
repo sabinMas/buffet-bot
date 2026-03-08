@@ -93,68 +93,73 @@ def get_analyst_consensus(ticker: str) -> dict:
         'sell':         'SELL',
     }
     try:
-        t    = yf.Ticker(ticker)
-        info = t.info
+        with _yf_semaphore:
+            t    = yf.Ticker(ticker)
+            info = t.info
 
-        target_mean   = info.get('targetMeanPrice')
-        target_low    = info.get('targetLowPrice')
-        target_high   = info.get('targetHighPrice')
-        current       = info.get('currentPrice') or info.get('regularMarketPrice')
-        num_analysts  = info.get('numberOfAnalystOpinions')
-        rating_raw    = info.get('recommendationMean')
-        rating_key_in = (info.get('recommendationKey') or '').lower().replace(' ', '_')
-        rating_key    = _RATING_MAP.get(rating_key_in, rating_key_in.upper() or 'N/A')
+            target_mean   = info.get('targetMeanPrice')
+            target_low    = info.get('targetLowPrice')
+            target_high   = info.get('targetHighPrice')
+            current       = info.get('currentPrice') or info.get('regularMarketPrice')
+            num_analysts  = info.get('numberOfAnalystOpinions')
+            rating_raw    = info.get('recommendationMean')
+            rating_key_in = (info.get('recommendationKey') or '').lower().replace(' ', '_')
+            rating_key    = _RATING_MAP.get(rating_key_in, rating_key_in.upper() or 'N/A')
 
-        if not target_mean:
-            return {}
+            if not target_mean:
+                return {}
 
-        upside_pct = round((float(target_mean) - float(current)) / float(current) * 100, 1) \
-                     if target_mean and current else None
+            upside_pct = round((float(target_mean) - float(current)) / float(current) * 100, 1) \
+                         if target_mean and current else None
 
-        recent_changes: list[dict] = []
-        try:
-            ud = t.upgrades_downgrades
-            if ud is not None and not ud.empty:
-                for _, row in ud.head(5).iterrows():
-                    recent_changes.append({
-                        'firm':   str(row.get('Firm', '')),
-                        'from':   str(row.get('FromGrade', '')),
-                        'to':     str(row.get('ToGrade', '')),
-                        'action': str(row.get('Action', '')),
-                    })
-        except Exception:
-            pass
+            recent_changes: list[dict] = []
+            try:
+                ud = t.upgrades_downgrades
+                if ud is not None and not ud.empty:
+                    for _, row in ud.head(5).iterrows():
+                        recent_changes.append({
+                            'firm':   str(row.get('Firm', '')),
+                            'from':   str(row.get('FromGrade', '')),
+                            'to':     str(row.get('ToGrade', '')),
+                            'action': str(row.get('Action', '')),
+                        })
+            except Exception:
+                pass
 
-        return {
-            'rating_key':      rating_key,
-            'rating_mean':     round(float(rating_raw), 2) if rating_raw else None,
-            'target_mean':     round(float(target_mean), 2),
-            'target_low':      round(float(target_low),  2) if target_low  else None,
-            'target_high':     round(float(target_high), 2) if target_high else None,
-            'current_price':   round(float(current),     2) if current     else None,
-            'upside_pct':      upside_pct,
-            'num_analysts':    int(num_analysts) if num_analysts else None,
-            'recent_changes':  recent_changes,
-        }
+            return {
+                'rating_key':      rating_key,
+                'rating_mean':     round(float(rating_raw), 2) if rating_raw else None,
+                'target_mean':     round(float(target_mean), 2),
+                'target_low':      round(float(target_low),  2) if target_low  else None,
+                'target_high':     round(float(target_high), 2) if target_high else None,
+                'current_price':   round(float(current),     2) if current     else None,
+                'upside_pct':      upside_pct,
+                'num_analysts':    int(num_analysts) if num_analysts else None,
+                'recent_changes':  recent_changes,
+            }
     except Exception:
         return {}
 
 
 def get_tech_indicators(ticker):
     """Basic RSI/MACD for high-risk"""
-    import yfinance as yf
-    data = yf.download(ticker, period='3mo', progress=False)
-    if data.empty:
+    try:
+        import yfinance as yf
+        with _yf_semaphore:
+            data = yf.download(ticker, period='3mo', progress=False)
+        if data.empty:
+            return {}
+        delta = data['Close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+        rs = gain / loss
+        rsi = 100 - (100 / (1 + rs)).iloc[-1]
+        ema12 = data['Close'].ewm(span=12).mean()
+        ema26 = data['Close'].ewm(span=26).mean()
+        macd = ema12 - ema26
+        return {'rsi': round(rsi, 1), 'macd': round(macd.iloc[-1], 4)}
+    except Exception:
         return {}
-    delta = data['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-    rs = gain / loss
-    rsi = 100 - (100 / (1 + rs)).iloc[-1]
-    ema12 = data['Close'].ewm(span=12).mean()
-    ema26 = data['Close'].ewm(span=26).mean()
-    macd = ema12 - ema26
-    return {'rsi': round(rsi, 1), 'macd': round(macd.iloc[-1], 4)}
 
 
 def get_realtime_data(ticker):
@@ -180,7 +185,8 @@ def get_realtime_data(ticker):
         pass
     # Fallback to yfinance
     try:
-        fi = yf.Ticker(ticker).fast_info
+        with _yf_semaphore:
+            fi = yf.Ticker(ticker).fast_info
         price = float(fi.last_price)
         open_price = float(fi.open) if fi.open else price
         change_pct = round((price - open_price) / open_price * 100, 2) if open_price else 0
