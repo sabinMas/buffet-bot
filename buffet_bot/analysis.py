@@ -17,6 +17,7 @@ from buffet_bot.data import (
 )
 from buffet_bot.backtest import get_multiframe_signals
 from buffet_bot.insiders import fetch_insider_transactions, insider_prompt_block
+from buffet_bot.macro import macro_prompt_block, compute_macro_score
 
 
 def _query_llms_freeform(prompt_text, primary_model):
@@ -50,25 +51,27 @@ def _run_analysis(ticker, risk, primary_model, strategy='value'):
         with _yf_semaphore:
             return yf.download(ticker, period='6mo', progress=False)['Close'].tail(30)
 
-    with ThreadPoolExecutor(max_workers=9) as ex:
-        f_hist       = ex.submit(_hist_dl)
-        f_buffett    = ex.submit(get_buffett_metrics, ticker)
-        f_realtime   = ex.submit(get_realtime_data, ticker)
-        f_news       = ex.submit(get_recent_news, ticker)
-        f_macro      = ex.submit(_fetch_fred_data)
-        f_insiders   = ex.submit(fetch_insider_transactions, ticker, 60, 5, 5)
-        f_multiframe = ex.submit(get_multiframe_signals, ticker)
-        f_analyst    = ex.submit(get_analyst_consensus, ticker)
-        f_tech       = ex.submit(get_tech_indicators, ticker) if risk == 'high' else None
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        f_hist             = ex.submit(_hist_dl)
+        f_buffett          = ex.submit(get_buffett_metrics, ticker)
+        f_realtime         = ex.submit(get_realtime_data, ticker)
+        f_news             = ex.submit(get_recent_news, ticker)
+        f_macro            = ex.submit(_fetch_fred_data)
+        f_insiders         = ex.submit(fetch_insider_transactions, ticker, 60, 5, 5)
+        f_multiframe       = ex.submit(get_multiframe_signals, ticker)
+        f_analyst          = ex.submit(get_analyst_consensus, ticker)
+        f_macro_prompt     = ex.submit(macro_prompt_block, ticker)
+        f_tech             = ex.submit(get_tech_indicators, ticker) if risk == 'high' else None
 
-    hist       = f_hist.result()
-    buffett    = f_buffett.result()
-    tech       = f_tech.result() if f_tech else {}
-    realtime   = f_realtime.result()
-    news       = f_news.result()
-    macro      = f_macro.result()
-    multiframe = f_multiframe.result()
-    analyst    = f_analyst.result()
+    hist             = f_hist.result()
+    buffett          = f_buffett.result()
+    tech             = f_tech.result() if f_tech else {}
+    realtime         = f_realtime.result()
+    news             = f_news.result()
+    macro            = f_macro.result()
+    multiframe       = f_multiframe.result()
+    analyst          = f_analyst.result()
+    macro_prompt_str = f_macro_prompt.result() or ""
     try:
         insider_txns = f_insiders.result()
     except Exception:
@@ -115,6 +118,10 @@ def _run_analysis(ticker, risk, primary_model, strategy='value'):
 
     insiders_block = insider_prompt_block(insider_txns)
 
+    macro_context_block = ""
+    if macro_prompt_str:
+        macro_context_block = f"\n## Macro Context{macro_prompt_str}"
+
     multiframe_block = ""
     if multiframe:
         sma_pos = ('above' if multiframe.get('above_sma50') else
@@ -143,7 +150,7 @@ def _run_analysis(ticker, risk, primary_model, strategy='value'):
     prompt = f"""
     Buffett Trading AI for {ticker} | Risk: {risk} | Strategy: {strategy.upper()}
     Buffett Score: {buffett['score']}/100 | ROE: {buffett.get('roe','?')}% | ROIC: {buffett.get('roic','?')}% | Debt/Eq: {buffett.get('debt_eq','?')} | OpMargin: {buffett.get('op_margin','?')}% | FCF Yield: {buffett.get('fcf_yield','?')}% | P/E: {buffett.get('pe','?')} | P/B: {buffett.get('pb','?')}
-    {live_block}{news_block}{macro_block}{insiders_block}{multiframe_block}{analyst_block}
+    {live_block}{news_block}{macro_block}{insiders_block}{macro_context_block}{multiframe_block}{analyst_block}
     Recent Prices (30d): {hist.to_dict()}
     Tech {'(RSI: ' + str(tech.get('rsi', 'N/A')) + ', MACD: ' + str(tech.get('macd', 'N/A')) + ')' if tech else ''}
 
@@ -211,6 +218,7 @@ def _run_analysis(ticker, risk, primary_model, strategy='value'):
         'consensus': consensus,
         'best_buy_resp': best_buy_resp,
         'analyst': analyst,
+        'macro_score': compute_macro_score(ticker),
     }
 
 

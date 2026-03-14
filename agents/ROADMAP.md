@@ -34,7 +34,10 @@
 | 24      | QA (v0.8.0 — options_engine tests + options_positions DB tests + CLI tests) | complete — 2026-03-08 |
 | 25      | PM (automate perf investigation — task backlog created) | complete — 2026-03-08 |
 | 26      | buffet-bot-perf-engineer (automate performance — 8 tasks) | complete — 2026-03-14 |
-| **27 →**| **QA (v0.8.0 perf changes regression sweep + options_engine expanded tests)** | **next** |
+| 27      | QA (perf regression sweep + options_engine expanded tests) | complete — 2026-03-14 |
+| 28      | Architect (v0.9.0 — macro.py + ADR-017) | complete — 2026-03-14 |
+| 29      | ENG (v0.9.0 — wire macro.py into analyze + edge-scan) | complete — 2026-03-14 |
+| **30 →**| **QA (v0.9.0 — macro wiring regression tests)** | **next** |
 
 **Current milestone:** v0.5.0 SHIPPED. v0.6.0 complete. v0.7.0 complete. v0.8.0 options-income CLI complete. v0.8.0 version bumped. 297 tests passing.
 **Do NOT take Security Auditor** until v1.0.0 milestone is explicitly started.
@@ -43,6 +46,18 @@
 ---
 
 ## Session Handoff Log
+
+### 2026-03-14 — ENG (session 29 — macro.py wiring)
+**Role taken:** Software Engineer — wire `buffet_bot/macro.py` into existing CLI commands
+**What was done:**
+- **`analysis.py`**: imported `macro_prompt_block`, `compute_macro_score`; added `f_macro_prompt = ex.submit(macro_prompt_block, ticker)` to the 10-worker concurrent fan-out; injected `macro_context_block` (`## Macro Context`) into the LLM prompt after the insider block; added `'macro_score': compute_macro_score(ticker)` to the returned data dict
+- **`cmd_trading.py`**: `analyze` command now displays `Buffett Score | Macro Score` inline with green (≥65) / yellow (40–64) / red (<40) color coding
+- **`cmd_intel.py`**: `edge-scan` gains `--macro` flag; concurrent `compute_macro_score()` fan-out for all candidates; `Macro` column added to results table; `macro_score` saved into `weights_json` column when `--macro --save` used together
+- **362 tests passing** — no regressions
+
+**Next:** Session 30 — QA regression tests for macro wiring (mock FRED + test macro_score in analyze return dict, --macro flag in edge-scan)
+
+---
 
 ### 2026-03-14 — Perf Engineer (session 26 — automate performance fixes)
 **Role taken:** buffet-bot-perf-engineer — implemented all 8 performance tasks for the `automate` command

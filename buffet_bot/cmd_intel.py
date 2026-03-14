@@ -33,6 +33,7 @@ from buffet_bot.crypto import (
 from buffet_bot.volatile import scan_volatile, display_volatile_table, VOLATILE_UNIVERSE
 from buffet_bot.edge import compute_edge_score, DEFAULT_WEIGHTS
 from buffet_bot.db import log_edge_scan, log_options_position, get_options_positions
+from buffet_bot.macro import compute_macro_score
 from buffet_bot.options_engine import (
     screen_covered_calls,
     find_optimal_csp,
@@ -436,7 +437,9 @@ def _edge_score_bar(score: float, width: int = 20) -> str:
 @click.option('--model', 'llm_model', default='qwen2.5:7b',
               type=click.Choice(MODELS), show_default=True,
               help='Ollama model to use for LLM conviction scoring.')
-def edge_scan(preset, tickers, min_edge, top, weights, output_json, save, use_llm, llm_model):
+@click.option('--macro', 'use_macro', is_flag=True, default=False,
+              help='Add a Macro Score column using FRED macro regime analysis.')
+def edge_scan(preset, tickers, min_edge, top, weights, output_json, save, use_llm, llm_model, use_macro):
     """Multi-factor edge score scan: buffet-bot edge-scan --universe growth --top 5"""
     # ── Build ticker list ────────────────────────────────────────────────────
     if tickers:
@@ -474,12 +477,14 @@ def edge_scan(preset, tickers, min_edge, top, weights, output_json, save, use_ll
 
     label = f"custom ({len(candidates)})" if tickers else preset
     llm_label = f"[bright_magenta]{llm_model}[/bright_magenta]" if use_llm else "[dim]off[/dim]"
+    macro_label = "[bright_green]on[/bright_green]" if use_macro else "[dim]off[/dim]"
     console.print(Panel(
         f"Universe: [bold bright_cyan]{label}[/bold bright_cyan]  |  "
         f"Tickers: [bold]{len(candidates)}[/bold]  |  "
         f"Min edge: [bold bright_yellow]{min_edge}[/bold bright_yellow]  |  "
         f"Top: [bold]{top}[/bold]  |  "
-        f"LLM: {llm_label}",
+        f"LLM: {llm_label}  |  "
+        f"Macro: {macro_label}",
         title="[bold bright_cyan]Multi-Factor Edge Scan[/bold bright_cyan]",
         border_style="bright_cyan",
     ))
@@ -509,13 +514,37 @@ def edge_scan(preset, tickers, min_edge, top, weights, output_json, save, use_ll
                 try:
                     r = fut.result()
                     results.append(r)
-                    if save:
+                    if save and not use_macro:
                         log_edge_scan(r)
                 except Exception as exc:
                     errors.append(f'{ticker}: {exc}')
 
     if errors:
         console.print(f'[dim red]Errors: {", ".join(errors)}[/dim red]')
+
+    # ── Optional macro score phase (concurrent — uses cached FRED data) ───────
+    macro_scores: dict[str, float] = {}
+    if use_macro:
+        with console.status('[bright_green]Computing macro scores...[/bright_green]', spinner='dots'):
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                macro_future_map = {
+                    pool.submit(compute_macro_score, t): t
+                    for t in candidates
+                }
+                for fut in as_completed(macro_future_map):
+                    t = macro_future_map[fut]
+                    try:
+                        macro_scores[t] = fut.result()
+                    except Exception:
+                        macro_scores[t] = 50.0
+        # Save with macro_score stored in weights_json blob
+        if save:
+            for r in results:
+                save_r = dict(r)
+                weights_with_macro = dict(r.get('weights_used', {}))
+                weights_with_macro['macro_score'] = macro_scores.get(r['ticker'], 50.0)
+                save_r['weights_used'] = weights_with_macro
+                log_edge_scan(save_r)
 
     # ── Filter + sort ────────────────────────────────────────────────────────
     passing = [r for r in results if r['edge_score'] >= min_edge]
@@ -551,6 +580,8 @@ def edge_scan(preset, tickers, min_edge, top, weights, output_json, save, use_ll
     tbl.add_column('Analyst',    justify='right',  style='bright_cyan',    no_wrap=True)
     if use_llm:
         tbl.add_column('LLM',    justify='right',  style='bright_magenta', no_wrap=True)
+    if use_macro:
+        tbl.add_column('Macro',  justify='right',  style='bright_green',   no_wrap=True)
 
     for rank, r in enumerate(passing, start=1):
         score = r['edge_score']
@@ -575,6 +606,10 @@ def edge_scan(preset, tickers, min_edge, top, weights, output_json, save, use_ll
             llm_val = c.get('llm', 50.0)
             llm_color = 'bright_green' if llm_val >= 70 else ('bright_yellow' if llm_val >= 50 else 'bright_red')
             row.append(f'[{llm_color}]{llm_val:.0f}[/{llm_color}]')
+        if use_macro:
+            ms = macro_scores.get(r['ticker'], 50.0)
+            ms_color = 'bright_green' if ms >= 65 else ('bright_yellow' if ms >= 40 else 'bright_red')
+            row.append(f'[{ms_color}]{ms:.0f}[/{ms_color}]')
         tbl.add_row(*row)
 
     console.print(tbl)
@@ -586,9 +621,10 @@ def edge_scan(preset, tickers, min_edge, top, weights, output_json, save, use_ll
     )
     console.print(f'[dim]Weights:[/dim]  {weight_line}')
     llm_note = f'  |  LLM: [bright_magenta]{llm_model}[/bright_magenta]' if use_llm else ''
+    macro_note = '  |  Macro: [bright_green]FRED[/bright_green]' if use_macro else ''
     console.print(
         f'[dim]{len(results)} scored  |  {len(passing)} passed min-edge {min_edge}  |  '
-        f'{"saved to DB" if save else "not saved"}[/dim]{llm_note}'
+        f'{"saved to DB" if save else "not saved"}[/dim]{llm_note}{macro_note}'
     )
 
 

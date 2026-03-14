@@ -333,6 +333,15 @@ def analyze(ticker, risk, dry_run, primary_model, strategy, as_json):
             border_style=r_color, box=box.ROUNDED,
         ))
 
+    macro_score = result.get('macro_score', 50.0)
+    macro_color = 'bright_green' if macro_score >= 65 else ('bright_yellow' if macro_score >= 40 else 'bright_red')
+    buffett_score = result['buffett'].get('score', 0)
+    buffett_color = _score_color(buffett_score)
+    console.print(
+        f"[dim]Buffett Score:[/dim] [{buffett_color}][bold]{buffett_score}[/bold][/{buffett_color}]/100  "
+        f"[dim]|  Macro Score:[/dim] [{macro_color}][bold]{macro_score:.0f}[/bold][/{macro_color}]/100"
+    )
+
     _print_ai_responses(result['responses'])
     console.print(f"\n[bright_cyan]CONSENSUS:[/bright_cyan] {_consensus_text(result['consensus'])}")
     data_src = result['realtime'].get('source', 'yfinance')
