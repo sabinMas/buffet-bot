@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "buffet-bot"
-version = "0.5.0"
+version = "0.8.0"
 description = "Buffett AI Trading Bot - Local LLM powered CLI"
 requires-python = ">=3.10"
 dependencies = [

@@ -22,6 +22,73 @@
 
 ---
 
+## ADR-017: Macro Intelligence Engine Implementation — `buffet_bot/macro.py`
+- **Date:** 2026-03-14
+- **Status:** Accepted
+- **Decided by:** Architect Agent (session 28)
+
+**Context:**
+
+v0.9.0 introduces macro intelligence — regime detection, sector rotation signals, and macro-aware scoring. ADR-015 (session 16) defined the interface contract. This ADR documents the implementation decisions made while building the full module.
+
+**Decision: FRED as the Sole Macro Data Source**
+
+All macro indicators come from the Federal Reserve Economic Data (FRED) API, via the existing `_fetch_fred_data()` in `data.py`. No paid data providers (Bloomberg, Refinitiv, Quandl Pro) are used. Rationale:
+1. **Already wired**: `data.py` already fetches DFF (fed funds rate), T10Y2Y (yield curve spread), and CPIAUCSL (CPI level) with concurrent requests and graceful degradation when `FRED_API_KEY` is absent.
+2. **Free tier sufficient**: FRED's free API provides the three indicators needed for regime classification with no rate limiting concerns at our call frequency (a few requests per user session, cached for 5 minutes).
+3. **No new dependencies**: Uses `requests` (already in requirements.txt) via the existing `_fetch_fred_data()` helper. No `fredapi` package or similar needed.
+4. **Alternatives rejected**: Bloomberg Terminal API ($24K/yr), Refinitiv Eikon ($22K/yr), and Quandl Premium ($500+/yr) were rejected as incompatible with the project's free, local-first philosophy. Alpha Vantage's economic data endpoint was considered but adds another API key dependency for marginal benefit — FRED covers the needed series directly.
+
+**Decision: Deterministic Regime Classification (Yield Curve + Fed Rate + CPI)**
+
+The regime classifier (`_classify_regime()`) uses simple threshold logic evaluated in priority order:
+1. **STAGFLATION**: fed_rate > 5% AND yield_curve < 0% — the worst-case combination of restrictive monetary policy with an inverted curve signaling recession risk alongside persistent inflation.
+2. **RISK_OFF**: yield_curve < 0% OR fed_rate > 5% — either signal alone warrants a defensive posture.
+3. **RISK_ON**: yield_curve > 0.5% AND fed_rate <= 3.5% — positive spread with accommodative/moderate policy.
+4. **NEUTRAL**: everything else — mixed or moderate signals.
+
+Confidence scores scale with data availability (2 indicators available = higher confidence) and signal magnitude (deeper inversion = higher STAGFLATION/RISK_OFF confidence).
+
+Rationale for thresholds:
+- **Yield curve inversion (< 0%)**: has preceded every US recession since 1970 with a 12-18 month lead time. The T10Y2Y spread is the most-cited recession predictor in academic finance.
+- **Fed funds rate > 5%**: historically, rates above 5% have preceded economic slowdowns (2006-2007, 2000, etc.). The 3.5% threshold for RISK_ON reflects the post-2008 "new normal" where sub-3.5% is considered accommodative.
+- **CPI as supporting context**: the CPI index level is included in signals for display purposes but is not a primary classifier input — the fed funds rate already reflects the Fed's inflation response and is a more actionable signal.
+
+**Decision: Rule-Based Sector Rotation (Not ML)**
+
+Sector rotation is implemented as a static lookup table (`_SECTOR_ROTATION`) mapping regime to per-sector signals (OVERWEIGHT / UNDERWEIGHT / NEUTRAL). Rationale:
+1. **No training data needed**: ML-based rotation would require labeled historical regime-sector return data, backtesting infrastructure, and model retraining. The project has none of this, and building it is a multi-sprint effort with questionable ROI for a paper trading CLI.
+2. **Explainable and auditable**: users (and the LLM prompt) can see exactly why a sector is OVERWEIGHT or UNDERWEIGHT. A random forest or neural net's "because the model said so" is unhelpful for a Buffett-philosophy tool.
+3. **Standard finance playbook**: the rotation rules follow well-documented CFA/Vanguard sector rotation research (e.g., equities rotate from defensives in contraction to cyclicals in expansion). This is established financial knowledge, not a novel model.
+4. **Future upgrade path**: if ML-based rotation is desired later, `get_sector_rotation_signal()` can be swapped to call a model internally while preserving the same `{signal, reason, regime}` return interface — no consumer code changes needed.
+
+**Decision: `macro_prompt_block()` Integration Pattern**
+
+The `macro_prompt_block(ticker)` function follows the same pattern as `insider_prompt_block(transactions)` in `insiders.py`:
+- Returns a compact string (one logical line) for concatenation into the LLM prompt in `analysis.py`
+- Returns `""` (empty string) when no macro data is available, so prompt construction degrades gracefully
+- Includes: regime, confidence, yield curve signal, fed rate signal, recession probability, sector rotation signal, and macro tailwind score
+- This gives the LLM context about macro headwinds/tailwinds without requiring the LLM to interpret raw economic data
+
+The ENG session will import `macro_prompt_block` in `analysis.py` and append it after the existing `fred_block` in the `_run_analysis()` prompt, following the same concatenation pattern used for `insiders_block`, `multiframe_block`, and `analyst_block`.
+
+**Decision: In-Memory Cache (Not DB Table)**
+
+ADR-015 proposed a `macro_regimes` SQLite table for caching. This implementation uses a simpler in-memory cache (thread-safe dict with a 5-minute TTL) instead. Rationale:
+- The macro regime changes at most once per day (FRED updates are daily). A 5-minute in-memory TTL is sufficient to prevent redundant FRED calls within a `scan` or `edge-scan` session (which may call `compute_macro_score()` for 20+ tickers).
+- A DB table adds schema migration overhead and is overkill for caching three numbers that refresh daily.
+- If persistent caching is needed later (e.g., for historical regime charting), a `macro_regimes` table can be added without changing the public API — `get_macro_regime()` would simply check the DB before calling FRED.
+
+**Consequences:**
+- `macro.py` has zero new pip dependencies — uses `_fetch_fred_data()` from `data.py`, `_yf_semaphore` from `data.py`, and `_COMPANY_DB` from `universe.py`
+- All 5 public functions return data structures (dicts, floats, strings); no Rich output, no prints
+- Every function returns a neutral fallback on failure: `get_macro_regime()` -> NEUTRAL regime, `compute_macro_score()` -> 50.0, `get_recession_probability()` -> 0.5, `macro_prompt_block()` -> ""
+- Module is thread-safe (in-memory cache uses `threading.Lock`)
+- CLI wiring (`macro-check`, `rotation-check` commands) and `_run_analysis()` prompt injection are deferred to the ENG session
+- The `macro_regimes` DB table from ADR-015 is not created in this session; can be added if persistent caching or historical charting is needed
+
+---
+
 ## ADR-016: Options Engine Implementation — Black-Scholes, IV Surface, Strategy Selection
 - **Date:** 2026-03-08
 - **Status:** Accepted

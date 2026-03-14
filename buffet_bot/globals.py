@@ -87,9 +87,11 @@ def ensure_ollama_running() -> bool:
         console.print(f"[red]Could not start Ollama: {e}[/red]")
         return False
 
-    # Poll until Ollama responds (up to 5 seconds)
+    # Poll until Ollama responds — exponential backoff (0.2s, 0.4s, 0.8s, …, cap 2s)
+    delay = 0.2
     for _ in range(10):
-        time.sleep(0.5)
+        time.sleep(delay)
+        delay = min(delay * 2, 2.0)
         try:
             _req.get("http://localhost:11434", timeout=1)
             console.print("[dim green]Ollama started successfully.[/dim green]")

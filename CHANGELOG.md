@@ -8,10 +8,94 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+---
+
+## [0.8.0] — 2026-03-08
+
+This release delivers the **Options Income Engine** milestone. A full Black-Scholes options pricing library ships as a new module, four `options-income` CLI sub-commands are added, and the `options_positions` DB table enables income tracking across sessions. 290 tests passing.
+
 ### Added
-- `live_guard.py` triple-confirmation wrapper for live trading (in progress — Architect session 16)
-- `compound` command: dividend + realized profit reinvestment via Alpaca corporate actions endpoint
-- `automate --sweep` flag: deterministic scan → analyze → size → execute pipeline
+
+**New module — `buffet_bot/options_engine.py`** (~700 lines, no new dependencies):
+- `black_scholes_price()` — closed-form European option pricing using stdlib `math.erf`
+- `compute_greeks()` — delta, gamma, theta, vega, rho for calls and puts
+- `estimate_iv()` — Newton-Raphson implied volatility solver (100 iterations, 1e-5 tolerance)
+- `build_iv_surface()` — full volatility surface across expiries with ATM IV and skew
+- `fetch_options_chain()` — yfinance-based chain fetch with DTE filtering and `_yf_semaphore`
+- `find_optimal_covered_call()` / `screen_covered_calls()` — concurrent ThreadPoolExecutor fan-out
+- `find_optimal_csp()` — cash-secured put screening with cash collateral validation
+- `screen_protective_puts()` — annualized cost budget filter
+- `find_iron_condor()` — 4-leg construction with net credit, max loss, and breakeven math
+- `score_wheel_strategy()` — composite 0–100 score (edge 30%, put yield 25%, call yield 25%, ATR 10%, liquidity 10%)
+- `check_rolls_needed()` — flags positions at 7 DTE with ATR-based roll strike suggestions
+- `get_options_recommendation()` — Ollama-powered strategy selection with contract finding
+- `annualized_yield()` — (premium / strike) × (365 / dte)
+- `_filter_liquid()` — OI >= 100, bid >= 0.05 liquidity gate
+
+**New command group — `options-income`** (in `cmd_intel.py`):
+- `options-income covered-calls` — screens tickers for covered call candidates; Rich table showing Strike/Mid/AnnYield/DTE/Delta/IV/OI; `--save` logs to DB
+- `options-income cash-puts` — edge score pre-filter (`--min-edge`), then optimal CSP per qualifying ticker; `--save` logs to DB
+- `options-income dashboard` — open positions table from `options_positions`; plotext 12-month realized income bar chart; `--all` flag for full history
+- `options-income roll-check` — color-coded action table (ROLL_UP / ROLL_DOWN / LET_EXPIRE / CLOSE) for all tracked positions
+
+**New DB table — `options_positions`** (in `db.py`):
+- `log_options_position()` — INSERT a tracked options position
+- `close_options_position()` — UPDATE to CLOSED; auto-computes P&L = (received − paid) × contracts × 100
+- `get_options_positions(status)` — SELECT by OPEN / CLOSED / ALL; ticker, status, and expiry indexes
+
+**Architecture — ADR-016** (`agents/DECISIONS.md`): Black-Scholes vs binomial tree decision, IV calculation approach, delta proxy rationale (two-tier: strike/price ratio when IV unavailable, full BS delta when IV exists)
+
+### Changed
+- `main.py` — `options_income` group registered
+- `db.py` — `init_options_positions_table()` wired into `init_db()`
+
+---
+
+## [0.7.0] — 2026-03-08
+
+This release delivers the **Multi-Factor Edge Score Engine** milestone. A new `edge.py` module provides five-factor scoring (Buffett fundamentals, insider flow, congressional trades, earnings beat rate, analyst consensus); `edge-scan` surfaces the top-ranked tickers from any universe; LLM conviction scores inject as a 20% weight via `--llm`.
+
+### Added
+
+**New module — `buffet_bot/edge.py`**:
+- `compute_edge_score()` — 5-way concurrent ThreadPoolExecutor fan-out; 50=neutral fallback on component failure
+- `compute_insider_signal()` — buy/sell net sentiment from SEC Form 4 data, scaled 0–100; `simulation_date` anti-lookahead guard
+- `compute_politician_signal()` — House + FMP congressional purchase ratio, deduped; anti-lookahead guard
+- `compute_earnings_signal()` — beat rate from `db.get_earnings_history()`; configurable `lookback_quarters`
+
+**New command — `edge-scan`** (in `cmd_intel.py`):
+- `--universe` flag — buffett / growth / income / balanced / etf / watchlist
+- `--tickers`, `--min-edge`, `--top`, `--weights` (JSON override), `--json`, `--save/--no-save`
+- `--llm` flag — queries Ollama per ticker to fill the 20% `W_LLM` weight slot
+- `--model` flag — choose inference model (default `qwen2.5:7b` for bulk conviction scoring)
+
+**New DB helpers** (in `db.py`): `init_edge_table()`, `log_edge_scan()`, `get_edge_history()`
+
+**Architecture — ADR-013** (`agents/DECISIONS.md`): multi-factor edge score design and `edge_scans` table schema
+
+---
+
+## [0.6.0] — 2026-03-06
+
+This release delivers the **Live Trading Guard + Compounding Engine** milestone. A triple-confirmation live guard protects all order paths; a new `compound` command automates dividend and profit reinvestment; `automate --sweep` adds a deterministic scan-to-execute pipeline.
+
+### Added
+
+**New module — `buffet_bot/live_guard.py`**:
+- `is_live_mode()` — dual env-var check (`BUFFET_BOT_LIVE=1` + non-empty `BUFFET_BOT_LIVE_SECRET`)
+- `confirm_live_execution()` — red warning panel + "YES I CONFIRM" typed confirmation
+- `log_live_audit()` / `init_live_audit_table()` — persistent audit log for all live executions
+- Wired at all 9 ADR-011 call sites across `cmd_trading.py`, `cmd_portfolio.py`, `cmd_account.py`, `plans.py`, `crypto.py`, `db.py`
+
+**New command — `compound`** (in `cmd_portfolio.py`):
+- Fetches dividend activities and realized profits; concurrent Buffett scoring across watchlist
+- `--source`, `--budget`, `--top`, `--min-score`, `--execute` flags; logs to `compound_log` on execute
+
+**`automate --sweep`** (in `automate.py`): deterministic 4-step scan → analyze → buy → done workflow; `confidence >= 0.6` filter; logs to `sweeps` table
+
+**yfinance crumb resilience**: `_yf_semaphore` applied across all data fetchers; graceful `HOLD` degradation on fetch failure
+
+**Architecture — ADR-011** (live guard call site inventory), **ADR-012** (compound log + sweeps schema)
 
 ---
 

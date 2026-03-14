@@ -204,10 +204,21 @@ def get_realtime_data(ticker):
         return {}
 
 
+_fred_cache: dict = {"data": {}, "ts": 0.0}
+_FRED_TTL = 300  # seconds (5 minutes)
+
+
 def _fetch_fred_data() -> dict:
-    """Fetch latest Fed rate, yield curve, and CPI from FRED (3 concurrent requests)."""
+    """Fetch latest Fed rate, yield curve, and CPI from FRED (3 concurrent requests).
+
+    Results are cached for 5 minutes so repeated analyze_stock() calls within
+    a single automate session don't re-hit the FRED API.
+    """
     if not FRED_API_KEY:
         return {}
+    now = time.monotonic()
+    if _fred_cache["data"] and now - _fred_cache["ts"] < _FRED_TTL:
+        return _fred_cache["data"]
     series = {'DFF': 'fed_rate', 'T10Y2Y': 'yield_curve', 'CPIAUCSL': 'cpi'}
 
     def _fetch_one(series_id, key):
@@ -236,6 +247,8 @@ def _fetch_fred_data() -> dict:
             k, v = f.result()
             if v is not None:
                 result[k] = v
+    _fred_cache["data"] = result
+    _fred_cache["ts"] = time.monotonic()
     return result
 
 

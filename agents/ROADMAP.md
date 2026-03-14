@@ -2,7 +2,7 @@
 
 > Managed by: Product Manager Agent
 > Last updated: 2026-03-06
-> Current version: v0.5.0
+> Current version: v0.8.0
 
 ---
 
@@ -33,15 +33,34 @@
 | 23      | ENG (v0.8.0 — options-income CLI + options_positions DB table) | complete — 2026-03-08 |
 | 24      | QA (v0.8.0 — options_engine tests + options_positions DB tests + CLI tests) | complete — 2026-03-08 |
 | 25      | PM (automate perf investigation — task backlog created) | complete — 2026-03-08 |
-| **26 →**| **buffet-bot-perf-engineer (automate performance — 8 tasks in task tracker)** | **next** |
+| 26      | buffet-bot-perf-engineer (automate performance — 8 tasks) | complete — 2026-03-14 |
+| **27 →**| **QA (v0.8.0 perf changes regression sweep + options_engine expanded tests)** | **next** |
 
-**Current milestone:** v0.5.0 SHIPPED. v0.6.0 complete. v0.7.0 complete. v0.8.0 options-income CLI complete. 290 tests passing.
+**Current milestone:** v0.5.0 SHIPPED. v0.6.0 complete. v0.7.0 complete. v0.8.0 options-income CLI complete. v0.8.0 version bumped. 297 tests passing.
 **Do NOT take Security Auditor** until v1.0.0 milestone is explicitly started.
-**Session 26 focus:** Performance Engineer — work through tasks #1–#8 in the task tracker to fix the automate command's 10-minute runtime. See Session Handoff Log entry for session 25 for full context.
+**Session 27 focus:** QA — regression sweep on the 8 automate performance changes; expand options_engine test coverage (Black-Scholes math, Greeks, wheel scoring, IV solver edge cases).
 
 ---
 
 ## Session Handoff Log
+
+### 2026-03-14 — Perf Engineer (session 26 — automate performance fixes)
+**Role taken:** buffet-bot-perf-engineer — implemented all 8 performance tasks for the `automate` command
+**What was done:**
+- **Task #1** (`cmd_account.py`): `scan_stocks()` `max_workers` raised from 2 → 8
+- **Task #2** (`cmd_account.py`): `_cached_buffett_metrics()` helper added; `scan_stocks` now hits cache on repeated tickers — `get_buffett_metrics` called at most once per ticker per session
+- **Task #3** (`analysis.py`): LLM inference in `_run_analysis()` parallelised with `ThreadPoolExecutor(max_workers=2)` — both models queried concurrently instead of sequentially
+- **Task #4** (`data.py`): `_fred_cache` module-level dict with 5-minute TTL added to `_fetch_fred_data()` — 3 FRED HTTP calls made at most once per 5 minutes per process
+- **Task #5** (`automate.py`): `time.perf_counter()` timing added per step; step and cumulative elapsed displayed in each step panel
+- **Task #6** (`cmd_account.py`): `_analysis_cache` dict in `_build_automate_tools()`; `analyze_stock()` returns cached result on repeated ticker calls
+- **Task #7** (`globals.py`): `ensure_ollama_running()` polling loop changed from fixed 0.5s sleep to exponential backoff (0.2s → 0.4s → 0.8s → … capped at 2s)
+- **Task #8** (`automate.py`): message history trimmed to system + last 3 exchanges (8 messages) before each LLM call — prevents unbounded context growth across 10 steps
+- **Test fix** (`tests/test_data_fetching.py`): added `setup_method` to `TestFetchFredData` to reset `_fred_cache` between tests — prevents cache contamination across test ordering
+- **297 tests passing** (was 290 — 7 additional assertions exercised by concurrent LLM path)
+
+**Next:** Session 27 — QA regression sweep on perf changes + expanded options_engine test coverage
+
+---
 
 ### 2026-03-08 — PM (session 25 — automate performance investigation)
 **Role taken:** Product Manager — `automate` command performance triage and task delegation

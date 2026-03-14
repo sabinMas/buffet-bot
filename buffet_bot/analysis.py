@@ -160,20 +160,24 @@ def _run_analysis(ticker, risk, primary_model, strategy='value'):
     if primary_model != MODELS[1]:
         models_to_query.append(MODELS[1])
 
-    responses = {}
-    for model in models_to_query:
-        color = MODEL_COLORS.get(model, 'white')
-        with console.status(f"[{color}]Querying {model}...[/{color}]"):
+    def _query_one(model):
+        try:
+            resp = ollama.chat(model=model, messages=[{'role': 'user', 'content': prompt}],
+                               options={'temperature': 0.2})
+            advice_str = resp['message']['content'].strip()
             try:
-                resp = ollama.chat(model=model, messages=[{'role': 'user', 'content': prompt}],
-                                   options={'temperature': 0.2})
-                advice_str = resp['message']['content'].strip()
                 advice = json.loads(advice_str) if advice_str.startswith('{') else {'reason': advice_str}
-                responses[model] = advice
             except json.JSONDecodeError:
-                responses[model] = {'error': 'Invalid JSON', 'raw': resp['message']['content']}
-            except Exception as e:
-                responses[model] = {'error': str(e)}
+                advice = {'error': 'Invalid JSON', 'raw': advice_str}
+            return model, advice
+        except Exception as e:
+            return model, {'error': str(e)}
+
+    console.print(f"[dim]Querying {len(models_to_query)} model(s) concurrently...[/dim]")
+    responses = {}
+    with ThreadPoolExecutor(max_workers=len(models_to_query)) as ex:
+        for model, advice in ex.map(lambda m: _query_one(m), models_to_query):
+            responses[model] = advice
 
     actions = [r.get('action', 'HOLD') for r in responses.values() if isinstance(r, dict) and 'action' in r]
     consensus = max(set(actions), key=actions.count) if actions else 'HOLD'

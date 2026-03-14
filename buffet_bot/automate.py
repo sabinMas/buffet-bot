@@ -6,10 +6,12 @@ module and `console` as parameters.
 """
 import re
 import json
+import time
 
-MAX_STEPS_DEFAULT = 10
-BUDGET_DEFAULT    = 500.0
-TEMPERATURE       = 0.2
+MAX_STEPS_DEFAULT  = 10
+BUDGET_DEFAULT     = 500.0
+TEMPERATURE        = 0.2
+MAX_HISTORY_PAIRS  = 3  # keep system + user-goal + this many exchange pairs = 8 messages max
 
 AGENT_SYSTEM_PROMPT = """
 You are an autonomous investing agent using Warren Buffett's value principles.
@@ -196,11 +198,18 @@ def run_agent_loop(
         {"role": "user",    "content": f"Begin working toward the goal: {goal}"},
     ]
 
-    summary    = ""
-    timed_out  = False
+    summary      = ""
+    timed_out    = False
+    loop_start   = time.perf_counter()
 
     for step in range(1, max_steps + 1):
+        # ── Trim message history (Task #8): keep system + last MAX_HISTORY_PAIRS exchanges ──
+        max_len = 2 + 2 * MAX_HISTORY_PAIRS
+        if len(messages) > max_len:
+            messages[2:] = messages[-(2 * MAX_HISTORY_PAIRS):]
+
         # ── Query LLM ────────────────────────────────────────────────────────
+        step_start = time.perf_counter()
         with console.status(f"[cyan]Agent thinking (step {step}/{max_steps})...[/cyan]"):
             try:
                 resp = ollama_module.chat(
@@ -241,11 +250,14 @@ def run_agent_loop(
             break
 
         # ── Step panel ───────────────────────────────────────────────────────
+        step_elapsed   = time.perf_counter() - step_start
+        total_elapsed  = time.perf_counter() - loop_start
         args_str = json.dumps(tool_args)
         console.print(Panel(
             f"[bold]Thought:[/bold] {thought}\n"
             f"[bold]Tool:[/bold]    {tool_name}   "
-            f"[dim]Args: {args_str}[/dim]",
+            f"[dim]Args: {args_str}[/dim]\n"
+            f"[dim]Step: {step_elapsed:.1f}s | Total: {total_elapsed:.1f}s[/dim]",
             title=f"[dim]Agent Step {step}[/dim]",
             border_style="dim",
             box=box.SIMPLE,

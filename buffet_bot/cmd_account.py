@@ -231,17 +231,24 @@ def plans(run_plan, delete_plan, set_schedule, run_due, primary_model):
 def _build_automate_tools(execute: bool, budget: float, primary_model: str, risk: str = 'medium', strategy: str = 'value', speculative: bool = False) -> dict:
     """Return the tool registry for the automate agent loop."""
     spent = [0.0]  # mutable closure for budget tracking
+    _buffett_cache: dict = {}   # Task #2: avoid double-fetch per ticker
+    _analysis_cache: dict = {}  # Task #6: deduplicate repeated analyze_stock calls
 
     DEFAULT_SCAN_TICKERS = [
         'AAPL', 'MSFT', 'GOOGL', 'BRK-B', 'JNJ', 'V', 'JPM', 'PG',
         'KO', 'WMT', 'ABBV', 'MRK', 'LLY', 'TMO', 'UNH', 'HD', 'AMZN', 'NVDA', 'META', 'TSLA',
     ]
 
+    def _cached_buffett_metrics(ticker):
+        if ticker not in _buffett_cache:
+            _buffett_cache[ticker] = get_buffett_metrics(ticker)
+        return _buffett_cache[ticker]
+
     def scan_stocks(top=5):
         tickers = DEFAULT_SCAN_TICKERS
         results = {}
-        with ThreadPoolExecutor(max_workers=min(len(tickers), 2)) as pool:
-            futures = {pool.submit(get_buffett_metrics, t): t for t in tickers}
+        with ThreadPoolExecutor(max_workers=min(len(tickers), 8)) as pool:
+            futures = {pool.submit(_cached_buffett_metrics, t): t for t in tickers}
             for fut in as_completed(futures):
                 t = futures[fut]
                 try:
@@ -253,6 +260,8 @@ def _build_automate_tools(execute: bool, budget: float, primary_model: str, risk
 
     def analyze_stock(ticker, risk=risk, strategy=strategy):
         ticker = ticker.upper()
+        if ticker in _analysis_cache:
+            return _analysis_cache[ticker]
         try:
             data = _run_analysis(ticker, risk, primary_model, strategy)
         except Exception as e:
@@ -260,7 +269,7 @@ def _build_automate_tools(execute: bool, budget: float, primary_model: str, risk
         realtime = data.get('realtime') or {}
         buffett  = data.get('buffett')  or {}
         best     = data.get('best_buy_resp') or {}
-        return {
+        result = {
             'ticker':        ticker,
             'consensus':     data.get('consensus', 'HOLD'),
             'buffett_score': buffett.get('score', 0),
@@ -268,6 +277,8 @@ def _build_automate_tools(execute: bool, budget: float, primary_model: str, risk
             'reason':        best.get('reason', ''),
             'suggested_qty': best.get('qty', 0),
         }
+        _analysis_cache[ticker] = result
+        return result
 
     def get_portfolio():
         try:

@@ -181,6 +181,12 @@ class TestGetBuffettMetrics:
 class TestFetchFredData:
     """Unit tests for the FRED macro data fetcher."""
 
+    def setup_method(self):
+        """Reset the module-level FRED cache before each test."""
+        import buffet_bot.data as _data_mod
+        _data_mod._fred_cache["data"] = {}
+        _data_mod._fred_cache["ts"] = 0.0
+
     def test_returns_empty_dict_when_no_api_key(self, monkeypatch):
         """FRED_API_KEY is '' → immediately return {}."""
         monkeypatch.setattr('buffet_bot.data.FRED_API_KEY', '')
