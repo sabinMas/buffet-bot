@@ -3,37 +3,19 @@ import os
 import json
 import pathlib
 import subprocess
-import click
 import contextlib
-import requests
 import requests as _req
 from datetime import datetime, timezone, timedelta
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import sqlite3
-import math
-import itertools
-import numpy as np
-from collections import Counter, deque
 from dotenv import load_dotenv
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest, GetOrdersRequest
-from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
 from alpaca.data import StockHistoricalDataClient
-from alpaca.data.requests import StockLatestQuoteRequest, StockLatestBarRequest
-import yfinance as yf
-import pandas as pd
-import ollama
 import time
 import warnings
 warnings.filterwarnings('ignore')
 
 from rich.console import Console
 from rich.panel import Panel
-from rich.table import Table
-from rich.prompt import Prompt
-from rich.text import Text
 from rich import box
-import plotext as plt
 
 load_dotenv()
 

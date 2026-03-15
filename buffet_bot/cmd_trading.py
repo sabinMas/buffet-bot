@@ -31,7 +31,7 @@ from buffet_bot.data import (
 )
 from buffet_bot.display import (
     _print_ai_responses, _consensus_text, _score_color,
-    _change_color, _print_live_market, _make_panel_title,
+    _change_color, _print_live_market, _make_panel_title, _bright_color,
 )
 from buffet_bot.analysis import _run_analysis, _place_order, _query_llms_freeform
 from buffet_bot.risk import _calculate_position_size
@@ -67,11 +67,7 @@ Question: {question}"""
     console.print(Panel(question, title=_make_panel_title("Question", "bright_cyan"), border_style="bright_cyan", box=box.ROUNDED))
     responses = _query_llms_freeform(prompt, primary_model)
     for model_name, response_text in responses.items():
-        color = MODEL_COLORS.get(model_name, 'bright_cyan')
-        if color == 'cyan':
-            color = 'bright_cyan'
-        elif color == 'magenta':
-            color = 'bright_magenta'
+        color = _bright_color(MODEL_COLORS.get(model_name, 'bright_cyan'))
         console.print(Panel(response_text, title=_make_panel_title(model_name, color),
                             border_style=color, box=box.ROUNDED))
 
@@ -683,11 +679,7 @@ def chat(primary_model):
             histories[m].append({'role': 'user', 'content': user_input})
 
         for model in models_in_session:
-            color = MODEL_COLORS.get(model, 'bright_cyan')
-            if color == 'cyan':
-                color = 'bright_cyan'
-            elif color == 'magenta':
-                color = 'bright_magenta'
+            color = _bright_color(MODEL_COLORS.get(model, 'bright_cyan'))
             try:
                 resp = ollama.chat(
                     model=model,
@@ -1269,11 +1261,7 @@ def explain(concept, primary_model):
             console.print(f"[bright_red]LLM error: {e}[/bright_red]")
             return
 
-    color = MODEL_COLORS.get(primary_model, 'bright_cyan')
-    if color == 'cyan':
-        color = 'bright_cyan'
-    elif color == 'magenta':
-        color = 'bright_magenta'
+    color = _bright_color(MODEL_COLORS.get(primary_model, 'bright_cyan'))
 
     console.print(Panel(
         explanation,

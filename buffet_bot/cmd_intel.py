@@ -19,7 +19,7 @@ from buffet_bot.crypto import CRYPTO_SYMBOLS
 from buffet_bot.data import (
     get_recent_news, get_realtime_data, get_tech_indicators, _complete_ticker,
 )
-from buffet_bot.display import _print_live_market, _make_panel_title
+from buffet_bot.display import _print_live_market, _make_panel_title, _bright_color
 from buffet_bot.politicians import (
     fetch_house_trades, fetch_fmp_trades, merge_deduplicate, display_politician_trades,
 )
@@ -120,11 +120,7 @@ def news(ticker, days, primary_model):
                     options={"temperature": 0.4},
                 )
                 summary = resp["message"]["content"].strip()
-                color = MODEL_COLORS.get(primary_model, "bright_cyan")
-                if color == 'cyan':
-                    color = 'bright_cyan'
-                elif color == 'magenta':
-                    color = 'bright_magenta'
+                color = _bright_color(MODEL_COLORS.get(primary_model, "bright_cyan"))
                 console.print(Panel(
                     summary,
                     title=_make_panel_title(f"AI Sentiment Summary ({primary_model})", color),

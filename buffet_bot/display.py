@@ -14,14 +14,16 @@ def _make_panel_title(text, color='bright_cyan', icon=None):
     return f"[bold {color}]{icon_str}{text}[/bold {color}]"
 
 
+def _bright_color(color: str) -> str:
+    """Upgrade dim color names to their bright equivalents for vibrant UI."""
+    _MAP = {'cyan': 'bright_cyan', 'magenta': 'bright_magenta'}
+    return _MAP.get(color, color)
+
+
 def _print_ai_responses(responses):
     """Print each model's response in a colored panel."""
     for model, resp in responses.items():
-        color = MODEL_COLORS.get(model, 'bright_cyan')
-        if color == 'cyan':
-            color = 'bright_cyan'
-        elif color == 'magenta':
-            color = 'bright_magenta'
+        color = _bright_color(MODEL_COLORS.get(model, 'bright_cyan'))
         content = json.dumps(resp, indent=2) if isinstance(resp, dict) else str(resp)
         console.print(Panel(content, title=_make_panel_title(model, color),
                             border_style=color, box=box.ROUNDED))

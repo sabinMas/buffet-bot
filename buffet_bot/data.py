@@ -14,9 +14,7 @@ from buffet_bot.globals import (
     API_KEY, SECRET_KEY, data_client, console,
     MODEL_COLORS, FRED_API_KEY, NASDAQ_EARNINGS_HEADERS,
 )
-from buffet_bot.globals import (
-    StockLatestQuoteRequest, StockLatestBarRequest,
-)
+from alpaca.data.requests import StockLatestQuoteRequest, StockLatestBarRequest
 from buffet_bot.db import get_watchlist
 from buffet_bot.universe import _COMPANY_DB as _UNIVERSE_DB  # type: ignore
 

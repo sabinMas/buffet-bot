@@ -777,3 +777,30 @@ def in_memory_db(monkeypatch, tmp_path):
 - Do not write tests that depend on market hours or live data
 - Do not write tests for implementation details — test behavior and outputs
 - Do not mark tests as passing if they are skipped or contain `pass` bodies
+
+---
+
+## Session Handoff Notes
+
+### Session 30 — 2026-03-15 — macro wiring regression tests
+
+**Tests written:** `tests/test_macro_wiring.py` (70 tests)
+**Final count:** 432 tests passing (0 failures, 0 regressions)
+
+**Scope covered:**
+- `buffet_bot/macro.py` — `_classify_regime`, `compute_macro_score`, `macro_prompt_block`, `get_macro_regime`, `get_sector_rotation_signal`, `get_recession_probability`
+- `buffet_bot/analysis.py` — verified `macro_score` key in `_run_analysis()` return dict; verified `compute_macro_score(ticker)` and `macro_prompt_block(ticker)` are called
+- `buffet_bot/cmd_intel.py` — `edge-scan --macro` flag: `compute_macro_score` called / not called appropriately; `Macro` column in table output; `macro_score` stored in `weights_json` on `--save`
+
+**Patterns established (for future QA sessions):**
+- When testing `_run_analysis()`, always provide a complete `realtime` dict with `change_pct`, `open`, `high`, `low`, `volume` keys — partial dict causes KeyError mid-test
+- When using `patch(...).start()` and needing to assert on the returned mock, capture the return value of `p.start()` (not the `_patch` object itself): `started = [p.start() for p in patches]; my_mock = started[i]`
+- `buffet_bot/macro.py` uses an in-memory cache (`_regime_cache`) — call `_reset_regime_cache()` at the start of any test that calls `get_macro_regime()` directly to avoid cache pollution across tests
+- `get_watchlist` is imported locally inside `edge_scan()` (not at module level) — do not patch `buffet_bot.cmd_intel.get_watchlist`; pass `--tickers` instead to avoid that code path
+- `Macro: off` always appears in the edge-scan panel header regardless of `--macro` flag — test for `Macro: FRED` (footer) or the `Macro` column in the table, not just `'Macro' in output`
+
+**Known gaps (next QA session items):**
+- Regime cache TTL expiry behavior not tested (time.time() mocking)
+- `_lookup_sector` yfinance slow-path not tested (only fast-path via `_UNIVERSE_DB`)
+- `get_recession_probability` numeric magnitude parsing edge cases (malformed format strings)
+- Integration test: full analyze CLI with `macro_score` appearing in `--json` output

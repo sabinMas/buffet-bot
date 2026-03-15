@@ -37,15 +37,32 @@
 | 27      | QA (perf regression sweep + options_engine expanded tests) | complete — 2026-03-14 |
 | 28      | Architect (v0.9.0 — macro.py + ADR-017) | complete — 2026-03-14 |
 | 29      | ENG (v0.9.0 — wire macro.py into analyze + edge-scan) | complete — 2026-03-14 |
-| **30 →**| **QA (v0.9.0 — macro wiring regression tests)** | **next** |
+| 30      | QA (v0.9.0 — macro wiring regression tests) | complete — 2026-03-15 |
+| **31 →**| **PM / Release Manager (v0.9.0 release — bump version, CHANGELOG, tag)** | **next** |
 
-**Current milestone:** v0.5.0 SHIPPED. v0.6.0 complete. v0.7.0 complete. v0.8.0 options-income CLI complete. v0.8.0 version bumped. 297 tests passing.
+**Current milestone:** v0.5.0 SHIPPED. v0.6.0 complete. v0.7.0 complete. v0.8.0 options-income CLI complete. v0.8.0 version bumped. v0.9.0 macro wiring complete. 432 tests passing.
 **Do NOT take Security Auditor** until v1.0.0 milestone is explicitly started.
-**Session 27 focus:** QA — regression sweep on the 8 automate performance changes; expand options_engine test coverage (Black-Scholes math, Greeks, wheel scoring, IV solver edge cases).
 
 ---
 
 ## Session Handoff Log
+
+### 2026-03-15 — QA (session 30 — macro wiring regression tests)
+**Role taken:** QA Engineer — write v0.9.0 macro wiring regression tests
+**What was done:**
+- Created `tests/test_macro_wiring.py` with 70 tests covering:
+  - `_classify_regime()` pure-logic tests (parametrized, all-None edge cases)
+  - `compute_macro_score()` unit tests: range 0-100, neutral fallback, sector/regime combos, exception safety
+  - `macro_prompt_block()` unit tests: non-empty on valid data, empty string when FRED unavailable, empty string on exception
+  - `get_macro_regime()` with mocked `_fetch_fred_data`: NEUTRAL fallback, regime classification from FRED data, partial data handling
+  - `_run_analysis()` in `analysis.py`: `macro_score` key present in return dict, is numeric, `compute_macro_score` called with ticker, `macro_prompt_block` called in concurrent fan-out
+  - `edge-scan --macro` via CliRunner: flag accepted, `compute_macro_score` called when flag set / not called when absent, `Macro` column in output, `macro_score` stored in `weights_json` on `--save`
+  - `get_recession_probability()` and `get_sector_rotation_signal()` unit tests
+- **432 tests passing (362 pre-existing + 70 new) — zero regressions**
+
+**Next:** Session 31 — PM / Release Manager: bump version to v0.9.0, write CHANGELOG entry, tag release
+
+---
 
 ### 2026-03-14 — ENG (session 29 — macro.py wiring)
 **Role taken:** Software Engineer — wire `buffet_bot/macro.py` into existing CLI commands

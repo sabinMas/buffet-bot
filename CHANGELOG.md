@@ -10,6 +10,39 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ---
 
+## [0.9.0] — 2026-03-15
+
+This release delivers the **Macro Intelligence** milestone. A new `buffet_bot/macro.py` module integrates FRED macroeconomic data; macro health scoring is injected into LLM analysis prompts and surfaced as a first-class display metric alongside the Buffett Score. 362 tests passing (up from 297).
+
+### Added
+
+**New module — `buffet_bot/macro.py`** (FRED macro data integration, no new dependencies):
+- `compute_macro_score()` — 0–100 macro health score derived from five FRED indicators: GDP growth rate, unemployment rate, fed funds rate, CPI (inflation), and the yield curve (10Y minus 2Y spread)
+- `macro_prompt_block()` — formats current macro indicators into a structured LLM context block (`## Macro Context`) for injection into analysis prompts
+- FRED data is fetched via the existing `_fetch_fred_data()` helper in `data.py`; no new external dependencies added
+
+**`analyze` command enhancements** (in `cmd_trading.py`):
+- Displays `Buffett Score | Macro Score` inline in the analysis output
+- Macro Score color-coded: green (≥ 65), yellow (40–64), red (< 40)
+
+**`edge-scan --macro` flag** (in `cmd_intel.py`):
+- Concurrent `compute_macro_score()` fan-out alongside the existing edge score computation
+- `Macro` column added to the results table with the same green/yellow/red color thresholds
+- `macro_score` saved into the `weights_json` column when `--macro --save` are both active
+
+**`analysis.py` wiring:**
+- `macro_prompt_block()` submission added as `f_macro_prompt` to the 10-worker `ThreadPoolExecutor` concurrent fan-out in `_run_analysis()`
+- `macro_context_block` injected into the LLM prompt after the insider block
+- `'macro_score'` key added to the returned data dict from `_run_analysis()`
+
+### Changed
+- `_run_analysis()` concurrent fan-out expanded to accommodate the macro prompt fetch
+
+### Fixed
+- FRED data cache TTL (5-minute, introduced in v0.8.0) ensures macro fetches do not add measurable latency when `analyze` is called in rapid succession
+
+---
+
 ## [0.8.0] — 2026-03-08
 
 This release delivers the **Options Income Engine** milestone. A full Black-Scholes options pricing library ships as a new module, four `options-income` CLI sub-commands are added, and the `options_positions` DB table enables income tracking across sessions. 290 tests passing.
